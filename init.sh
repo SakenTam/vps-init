@@ -1,14 +1,15 @@
 #!/bin/bash
 
 # -----------------------------------------------------------------------------
-# 适用于 Ubuntu 24 的交互式 VPS 初始化脚本 (Root 运行版) v5
+# 适用于 Ubuntu 24 的交互式 VPS 初始化脚本 (Root 运行版) v6
 #
 # 修复:
-# 1. (v5) [移除] 鉴于 Oracle 内核缺少 'zram' 模块，彻底移除 Zram 功能。
-# 2. (v5) [调整] 将 'task_setup_swapfile' 的大小从 1G 增加到 2G，
-#    以补偿没有 Zram 的情况。
-# 3. (v4) [保留] 修正 Docker 的检测逻辑 (test -f)。
-# 4. (v3) [保留] 修正 Zsh 安装逻辑 (ZIM_HOME 错误)。
+# 1. (v6) [优化] Docker 安装任务改用官方 'get.docker.com' 脚本，
+#    替代 apt-get install docker.io (版本太旧)。
+# 2. (v5) [移除] 移除 Zram (因 Oracle 内核不兼容)。
+# 3. (v5) [调整] Swapfile 增加到 2G。
+# 4. (v4) [保留] 修正 Docker 检测逻辑 (test -f)。
+# 5. (v3) [保留] 修正 Zsh 安装逻辑 (ZIM_HOME 错误)。
 # -----------------------------------------------------------------------------
 
 # --- 颜色定义 ---
@@ -55,7 +56,7 @@ task_install_base() {
     success "基础软件包安装完成。"
 }
 
-# 2. [V5 调整] 配置 2G Swapfile (替代 Zram)
+# 2. 配置 2G Swapfile
 task_setup_swapfile() {
     info "2. 开始配置 2G Swapfile..."
     if swapon -s | grep -q '/swapfile'; then
@@ -80,7 +81,6 @@ task_setup_swapfile() {
         info "/etc/fstab 中已包含 Swapfile 配置。"
     fi
     
-    # 调整 Swappiness, 1G 内存更积极使用 swap
     if ! grep -q "vm.swappiness=60" /etc/sysctl.conf; then
          echo 'vm.swappiness=60' | tee -a /etc/sysctl.conf
          sysctl -p >/dev/null 2>&1
@@ -199,29 +199,55 @@ task_configure_ufw() {
     fi
 }
 
-# 6. (可选) 安装 Docker
+# 6. (可选) 安装 Docker [V6 优化]
 task_install_docker_optional() {
     info "6. 检查是否安装 Docker..."
     
     read -p "您是否希望安装 Docker? (y/N) " choice
     case "$choice" in 
       y|Y )
-        # V4 修复：使用更可靠的文件检查
         if [ -f "/usr/bin/docker" ]; then
             info "Docker 已安装 (/usr/bin/docker 存在)。"
+            # 确保 ubuntu 用户在 docker 组中
+            if id "ubuntu" >/dev/null 2>&1 && ! groups "ubuntu" | grep -q "\bdocker\b"; then
+                info "Docker 已安装，但 'ubuntu' 用户不在 docker 组中。正在添加..."
+                usermod -aG docker "ubuntu"
+                warn "用户 'ubuntu' 已添加到 docker 组。请重新登录以生效。"
+            fi
         else
-            info "开始安装 Docker..."
-            apt-get install -y docker.io docker-compose
+            info "开始使用 Docker 官方脚本安装 Docker..."
+            
+            # 下载脚本
+            curl -fsSL https://get.docker.com -o get-docker.sh
+            
+            # 检查下载是否成功
+            if [ ! -f "get-docker.sh" ]; then
+                error "下载 Docker 安装脚本失败。"
+                return 1
+            fi
+            
+            # 执行脚本 (我们已经是 root，不需要 sudo)
+            sh get-docker.sh
+            
+            # 清理安装脚本
+            rm get-docker.sh
+            
+            # 检查安装是否成功
+            if [ ! -f "/usr/bin/docker" ]; then
+                 error "Docker 安装失败。请检查上面的日志。"
+                 return 1
+            fi
+            
+            info "启动并启用 Docker 服务..."
+            systemctl enable docker
+            systemctl start docker
             
             if id "ubuntu" >/dev/null 2>&1; then
                 info "将用户 'ubuntu' 添加到 'docker' 组..."
                 usermod -aG docker "ubuntu"
             fi
             
-            systemctl enable docker
-            systemctl start docker
-            
-            success "Docker 安装完成。"
+            success "Docker (及 Docker Compose) 安装完成。"
             warn "用户 'ubuntu' 需要退出并重新登录，才能无需 sudo 运行 docker 命令。"
         fi
         ;;
@@ -231,12 +257,12 @@ task_install_docker_optional() {
     esac
 }
 
-# --- 菜单系统 (V5 调整) ---
+# --- 菜单系统 ---
 
 run_all_tasks() {
     info "--- 开始执行全部初始化任务 ---"
     task_install_base
-    task_setup_swapfile   # [V5 移除] Zram
+    task_setup_swapfile
     task_configure_zsh
     task_optimize_network_bbr
     task_configure_ufw
@@ -248,11 +274,11 @@ show_submenu() {
     while true; do
         echo -e "\n${YELLOW}--- 分类安装菜单 ---${NC}"
         echo "1. 安装基础包 (neofetch, btop, git...)"
-        echo "2. 配置 2G Swapfile (硬盘交换)"  # [V5 调整]
-        echo "3. 配置 Zsh (为 root 和 ubuntu)"  # [V5 调整]
-        echo "4. 启用 BBR 网络优化"           # [V5 调整]
-        echo "5. 配置 UFW 防火墙 (22, 80, 443)" # [V5 调整]
-        echo "6. (可选) 安装 Docker"           # [V5 调整]
+        echo "2. 配置 2G Swapfile (硬盘交换)"
+        echo "3. 配置 Zsh (为 root 和 ubuntu)"
+        echo "4. 启用 BBR 网络优化"
+        echo "5. 配置 UFW 防火墙 (22, 80, 443)"
+        echo "6. (可选) 安装 Docker (官方脚本)" # [V6 调整]
         echo "-------------------------"
         echo "b. 返回主菜单"
         echo "q. 退出脚本"
