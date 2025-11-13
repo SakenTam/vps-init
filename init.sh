@@ -1,15 +1,13 @@
 #!/bin/bash
 
 # -----------------------------------------------------------------------------
-# 适用于 Ubuntu 24 的交互式 VPS 初始化脚本 (Root 运行版) v6
+# 适用于 Ubuntu 24 的交互式 VPS 初始化脚本 (Root 运行版) v7
 #
-# 修复:
-# 1. (v6) [优化] Docker 安装任务改用官方 'get.docker.com' 脚本，
-#    替代 apt-get install docker.io (版本太旧)。
-# 2. (v5) [移除] 移除 Zram (因 Oracle 内核不兼容)。
-# 3. (v5) [调整] Swapfile 增加到 2G。
-# 4. (v4) [保留] 修正 Docker 检测逻辑 (test -f)。
-# 5. (v3) [保留] 修正 Zsh 安装逻辑 (ZIM_HOME 错误)。
+# 变更日志:
+# 1. (v7) [新增] 添加 'task_set_timezone' 函数，用于设置时区为 Asia/Shanghai。
+# 2. (v6) [优化] Docker 安装改用官方 'get.docker.com' 脚本。
+# 3. (v5) [移除] 移除 Zram (因 Oracle 内核不兼容)。
+# 4. (v5) [调整] Swapfile 增加到 2G。
 # -----------------------------------------------------------------------------
 
 # --- 颜色定义 ---
@@ -199,7 +197,7 @@ task_configure_ufw() {
     fi
 }
 
-# 6. (可选) 安装 Docker [V6 优化]
+# 6. (可选) 安装 Docker
 task_install_docker_optional() {
     info "6. 检查是否安装 Docker..."
     
@@ -208,7 +206,6 @@ task_install_docker_optional() {
       y|Y )
         if [ -f "/usr/bin/docker" ]; then
             info "Docker 已安装 (/usr/bin/docker 存在)。"
-            # 确保 ubuntu 用户在 docker 组中
             if id "ubuntu" >/dev/null 2>&1 && ! groups "ubuntu" | grep -q "\bdocker\b"; then
                 info "Docker 已安装，但 'ubuntu' 用户不在 docker 组中。正在添加..."
                 usermod -aG docker "ubuntu"
@@ -217,22 +214,16 @@ task_install_docker_optional() {
         else
             info "开始使用 Docker 官方脚本安装 Docker..."
             
-            # 下载脚本
             curl -fsSL https://get.docker.com -o get-docker.sh
             
-            # 检查下载是否成功
             if [ ! -f "get-docker.sh" ]; then
                 error "下载 Docker 安装脚本失败。"
                 return 1
             fi
             
-            # 执行脚本 (我们已经是 root，不需要 sudo)
             sh get-docker.sh
-            
-            # 清理安装脚本
             rm get-docker.sh
             
-            # 检查安装是否成功
             if [ ! -f "/usr/bin/docker" ]; then
                  error "Docker 安装失败。请检查上面的日志。"
                  return 1
@@ -257,6 +248,32 @@ task_install_docker_optional() {
     esac
 }
 
+# 7. [V7 新增] 更改时区
+task_set_timezone() {
+    info "7. 更改时区为 Asia/Shanghai..."
+    local TARGET_TZ="Asia/Shanghai"
+    
+    # timedatectl status (新版) 或 timedatectl (旧版)
+    local current_tz=$(timedatectl | grep "Time zone" | awk '{print $3}')
+    
+    if [ "$current_tz" == "$TARGET_TZ" ]; then
+        info "时区已是 $TARGET_TZ。"
+    else
+        timedatectl set-timezone $TARGET_TZ
+        if [ $? -eq 0 ]; then
+            info "时区已设置为 $TARGET_TZ。"
+        else
+            error "设置时区失败。"
+            return 1
+        fi
+    fi
+    
+    info "验证当前时间："
+    timedatectl | grep "Time zone"
+    success "时区设置完成。"
+}
+
+
 # --- 菜单系统 ---
 
 run_all_tasks() {
@@ -267,6 +284,7 @@ run_all_tasks() {
     task_optimize_network_bbr
     task_configure_ufw
     task_install_docker_optional 
+    task_set_timezone  # <-- V7 新增
     success "--- 所有任务已执行完毕 ---"
 }
 
@@ -278,12 +296,13 @@ show_submenu() {
         echo "3. 配置 Zsh (为 root 和 ubuntu)"
         echo "4. 启用 BBR 网络优化"
         echo "5. 配置 UFW 防火墙 (22, 80, 443)"
-        echo "6. (可选) 安装 Docker (官方脚本)" # [V6 调整]
+        echo "6. (可选) 安装 Docker (官方脚本)"
+        echo "7. 更改时区 (Asia/Shanghai)" # <-- V7 新增
         echo "-------------------------"
         echo "b. 返回主菜单"
         echo "q. 退出脚本"
         
-        read -p "请输入选项 [1-6, b, q]: " sub_choice
+        read -p "请输入选项 [1-7, b, q]: " sub_choice # <-- V7 调整
         
         case $sub_choice in
             1) task_install_base ;;
@@ -292,6 +311,7 @@ show_submenu() {
             4) task_optimize_network_bbr ;;
             5) task_configure_ufw ;;
             6) task_install_docker_optional ;;
+            7) task_set_timezone ;; # <-- V7 新增
             b) break ;; 
             q) exit 0 ;;
             *) error "无效选项。" ;;
