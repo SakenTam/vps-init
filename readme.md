@@ -2,13 +2,30 @@
 
 ### 步骤一：将脚本下载到您的 VPS
 
-您有多种方式将此脚本上传到新服务器，这里推荐两种最简单的方法。
-
-**方法 A: 使用 `curl` (推荐)**
-
 如果您的新系统已安装 `curl` 或 `wget`：
 
 ```bash
-# （请将 URL 替换为您自己的 GitHub 仓库 raw 链接）
-curl -L -o init-vps.sh [https://github.com/您的用户名/您的仓库名/raw/main/init-vps.sh](https://github.com/您的用户名/您的仓库名/raw/main/init-vps.sh)
+curl -L -o init.sh https://raw.githubusercontent.com/SakenTam/vps-init/refs/heads/main/init.sh
+```
+
+### 步骤二：运行脚本
+
+这是最关键的步骤，请严格遵守：
+
+添加执行权限:
+
+```bash
+chmod +x init.sh
+```
+
+切换到 Root 用户:
+
+```bash
+sudo -i
+```
+
+使用 bash 运行脚本 (请勿使用 sh):
+
+```bash
+bash ./init.sh
 ```
