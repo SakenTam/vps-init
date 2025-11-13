@@ -1,0 +1,320 @@
+#!/bin/bash
+
+# -----------------------------------------------------------------------------
+# 适用于 Ubuntu 24 的交互式 VPS 初始化脚本 (Root 运行版) v5
+#
+# 修复:
+# 1. (v5) [移除] 鉴于 Oracle 内核缺少 'zram' 模块，彻底移除 Zram 功能。
+# 2. (v5) [调整] 将 'task_setup_swapfile' 的大小从 1G 增加到 2G，
+#    以补偿没有 Zram 的情况。
+# 3. (v4) [保留] 修正 Docker 的检测逻辑 (test -f)。
+# 4. (v3) [保留] 修正 Zsh 安装逻辑 (ZIM_HOME 错误)。
+# -----------------------------------------------------------------------------
+
+# --- 颜色定义 ---
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[0;33m'
+BLUE='\033[0;34m'
+NC='\033[0m' # No Color
+
+# --- 助手函数 ---
+info() {
+    echo -e "${BLUE}[INFO] $1${NC}"
+}
+
+success() {
+    echo -e "${GREEN}[SUCCESS] $1${NC}"
+}
+
+warn() {
+    echo -e "${YELLOW}[WARNING] $1${NC}"
+}
+
+error() {
+    echo -e "${RED}[ERROR] $1${NC}" >&2
+}
+
+# --- 安全检查 (Root 运行) ---
+pre_check() {
+    info "开始执行安全检查..."
+    if [ "$(id -u)" -ne 0 ]; then
+        error "请使用 root 用户 (例如: sudo -i) 运行此脚本。"
+        exit 1
+    fi
+    success "以 Root 权限运行，检查通过。"
+}
+
+# --- 任务函数 (模块化 & 幂等) ---
+
+# 1. 安装基础包
+task_install_base() {
+    info "1. 开始安装基础软件包..."
+    apt-get update -qq
+    apt-get install -y neofetch btop vim wget curl git unzip
+    success "基础软件包安装完成。"
+}
+
+# 2. [V5 调整] 配置 2G Swapfile (替代 Zram)
+task_setup_swapfile() {
+    info "2. 开始配置 2G Swapfile..."
+    if swapon -s | grep -q '/swapfile'; then
+        info "Swapfile 似乎已激活。"
+    else
+        if [ ! -f /swapfile ]; then
+            info "创建 /swapfile (2G)..."
+            fallocate -l 2G /swapfile
+            chmod 600 /swapfile
+            mkswap /swapfile
+        else
+            info "/swapfile 文件已存在。"
+        fi
+        swapon /swapfile
+        info "Swapfile 已激活。"
+    fi
+    
+    if ! grep -q "swapfile" /etc/fstab; then
+        info "添加 Swapfile 到 /etc/fstab 以实现开机自启..."
+        echo '/swapfile none swap sw 0 0' | tee -a /etc/fstab
+    else
+        info "/etc/fstab 中已包含 Swapfile 配置。"
+    fi
+    
+    # 调整 Swappiness, 1G 内存更积极使用 swap
+    if ! grep -q "vm.swappiness=60" /etc/sysctl.conf; then
+         echo 'vm.swappiness=60' | tee -a /etc/sysctl.conf
+         sysctl -p >/dev/null 2>&1
+    fi
+    
+    success "Swapfile 配置完成。"
+}
+
+# 3. 配置 Zsh (双目标: root + ubuntu)
+_install_zsh_for_user() {
+    local ZIM_USER="$1"
+    local ZIM_HOME="$2"
+
+    if ! id "$ZIM_USER" >/dev/null 2>&1; then
+        warn "用户 $ZIM_USER 不存在。跳过为其配置 Zsh。"
+        return 1
+    fi
+    if [ ! -d "$ZIM_HOME" ]; then
+        warn "用户 $ZIM_USER 的家目录 $ZIM_HOME 不存在。跳过。"
+        return 1
+    fi
+    
+    info "--- 正在为 [$ZIM_USER] (家: $ZIM_HOME) 配置 Zsh ---"
+
+    if [ ! -d "$ZIM_HOME/.zim" ]; then
+        info "为 $ZIM_USER 预配置 p10k 模块..."
+        sudo -u "$ZIM_USER" touch "$ZIM_HOME/.zimrc"
+        if ! sudo -u "$ZIM_USER" grep -q "romkatv/powerlevel10k" "$ZIM_HOME/.zimrc"; then
+            echo "zmodule romkatv/powerlevel10k" | sudo -u "$ZIM_USER" tee -a "$ZIM_HOME/.zimrc" > /dev/null
+        fi
+
+        info "为 $ZIM_USER 运行 Zim 框架安装器..."
+        sudo -u "$ZIM_USER" ZDOTDIR="$ZIM_HOME" zsh -c "curl -fsSL https://raw.githubusercontent.com/zimfw/install/master/install.zsh | zsh"
+        
+        info "Zim 框架及 P10k 已为 $ZIM_USER 安装。"
+    else
+        info "Zim 框架已为 $ZIM_USER 安装。"
+    fi
+
+    if [ "$(getent passwd "$ZIM_USER" | cut -d: -f7)" != "$(which zsh)" ]; then
+        info "更改 $ZIM_USER 的默认 shell 为 zsh..."
+        chsh -s "$(which zsh)" "$ZIM_USER"
+        success "[$ZIM_USER] 的 shell 已更改。"
+    else
+        info "[$ZIM_USER] 的默认 shell 已经是 zsh。"
+    fi
+}
+
+task_configure_zsh() {
+    info "3. 开始配置 Zsh, Zim 和 Powerlevel10k..."
+    
+    if ! command -v zsh >/dev/null 2>&1; then
+        apt-get install -y zsh
+    else
+        info "Zsh 已安装。"
+    fi
+
+    if [ -f "/etc/zsh/zshrc" ] && grep -q "^\s*compinit" "/etc/zsh/zshrc"; then
+        info "修补 /etc/zsh/zshrc 以防止 'compinit' 冲突..."
+        cp /etc/zsh/zshrc /etc/zsh/zshrc.bak-$(date +%F) >/dev/null 2>&1
+        sed -i 's/^\s*compinit/#&/' /etc/zsh/zshrc
+    fi
+
+    _install_zsh_for_user "root" "/root"
+    _install_zsh_for_user "ubuntu" "/home/ubuntu"
+
+    success "Zsh 双目标配置完成。"
+    info "请相关用户 (root, ubuntu) 退出并重新登录以启用 Zsh。"
+}
+
+# 4. 开启 BBR
+task_optimize_network_bbr() {
+    info "4. 开始启用 BBR..."
+    local BBR_CONF_1="net.core.default_qdisc=fq"
+    local BBR_CONF_2="net.ipv4.tcp_congestion_control=bbr"
+    
+    if grep -q "$BBR_CONF_2" /etc/sysctl.conf; then
+        info "BBR 似乎已配置。"
+    else
+        info "写入 BBR 配置到 /etc/sysctl.conf..."
+        echo "$BBR_CONF_1" | tee -a /etc/sysctl.conf
+        echo "$BBR_CONF_2" | tee -a /etc/sysctl.conf
+        info "应用配置..."
+        sysctl -p >/dev/null 2>&1
+    fi
+    
+    info "检查 BBR 状态..."
+    if sysctl net.ipv4.tcp_congestion_control | grep -q "bbr"; then
+        success "BBR 已成功启用。"
+    else
+        warn "BBR 未能立即启用，可能需要重启系统 (reboot)。"
+    fi
+}
+
+# 5. 配置 UFW 防火墙
+task_configure_ufw() {
+    info "5. 开始配置 UFW 防火墙..."
+    if ! command -v ufw >/dev/null 2>&1; then
+        apt-get install -y ufw
+    fi
+    
+    ufw default deny incoming
+    ufw default allow outgoing
+    
+    info "设置 UFW 规则 (Limit 22/tcp, Allow 80/tcp, Allow 443/tcp)..."
+    ufw limit 22/tcp comment 'SSH'
+    ufw allow 80/tcp comment 'HTTP'
+    ufw allow 443/tcp comment 'HTTPS'
+    
+    info "启用 UFW..."
+    if ufw --force enable; then
+        success "UFW 已启用并配置完成。"
+        ufw status verbose
+    else
+        error "UFW 启用失败。"
+    fi
+}
+
+# 6. (可选) 安装 Docker
+task_install_docker_optional() {
+    info "6. 检查是否安装 Docker..."
+    
+    read -p "您是否希望安装 Docker? (y/N) " choice
+    case "$choice" in 
+      y|Y )
+        # V4 修复：使用更可靠的文件检查
+        if [ -f "/usr/bin/docker" ]; then
+            info "Docker 已安装 (/usr/bin/docker 存在)。"
+        else
+            info "开始安装 Docker..."
+            apt-get install -y docker.io docker-compose
+            
+            if id "ubuntu" >/dev/null 2>&1; then
+                info "将用户 'ubuntu' 添加到 'docker' 组..."
+                usermod -aG docker "ubuntu"
+            fi
+            
+            systemctl enable docker
+            systemctl start docker
+            
+            success "Docker 安装完成。"
+            warn "用户 'ubuntu' 需要退出并重新登录，才能无需 sudo 运行 docker 命令。"
+        fi
+        ;;
+      * )
+        info "跳过安装 Docker。"
+        ;;
+    esac
+}
+
+# --- 菜单系统 (V5 调整) ---
+
+run_all_tasks() {
+    info "--- 开始执行全部初始化任务 ---"
+    task_install_base
+    task_setup_swapfile   # [V5 移除] Zram
+    task_configure_zsh
+    task_optimize_network_bbr
+    task_configure_ufw
+    task_install_docker_optional 
+    success "--- 所有任务已执行完毕 ---"
+}
+
+show_submenu() {
+    while true; do
+        echo -e "\n${YELLOW}--- 分类安装菜单 ---${NC}"
+        echo "1. 安装基础包 (neofetch, btop, git...)"
+        echo "2. 配置 2G Swapfile (硬盘交换)"  # [V5 调整]
+        echo "3. 配置 Zsh (为 root 和 ubuntu)"  # [V5 调整]
+        echo "4. 启用 BBR 网络优化"           # [V5 调整]
+        echo "5. 配置 UFW 防火墙 (22, 80, 443)" # [V5 调整]
+        echo "6. (可选) 安装 Docker"           # [V5 调整]
+        echo "-------------------------"
+        echo "b. 返回主菜单"
+        echo "q. 退出脚本"
+        
+        read -p "请输入选项 [1-6, b, q]: " sub_choice
+        
+        case $sub_choice in
+            1) task_install_base ;;
+            2) task_setup_swapfile ;;
+            3) task_configure_zsh ;;
+            4) task_optimize_network_bbr ;;
+            5) task_configure_ufw ;;
+            6) task_install_docker_optional ;;
+            b) break ;; 
+            q) exit 0 ;;
+            *) error "无效选项。" ;;
+        esac
+        
+        if [ "$sub_choice" != "b" ]; then
+             read -p "任务完成。按 Enter 键返回子菜单..."
+        fi
+    done
+}
+
+show_main_menu() {
+    while true; do
+        echo -e "\n${GREEN}=========================================${NC}"
+        echo -e "${GREEN}    Ubuntu 24 VPS 自动化初始化脚本${NC}"
+        echo -e "${GREEN}        (必须以 Root 身份运行)${NC}"
+        echo -e "${GREEN}=========================================${NC}"
+        echo "请选择您的操作模式:"
+        echo ""
+        echo "1. 安装全部所需 (推荐首次运行)"
+        echo "2. 按分类安装 (选择性执行任务)"
+        echo "q. 退出"
+        echo ""
+        read -p "请输入选项 [1, 2, q]: " main_choice
+        
+        case $main_choice in
+            1)
+                run_all_tasks
+                break 
+                ;;
+            2)
+                show_submenu
+                ;;
+            q)
+                exit 0
+                ;;
+            *)
+                error "无效选项，请重新输入。"
+                ;;
+        esac
+    done
+}
+
+# --- 脚本主入口 ---
+main() {
+    pre_check
+    show_main_menu
+    info "初始化脚本执行完毕。"
+}
+
+# 启动脚本
+main
