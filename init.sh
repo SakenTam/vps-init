@@ -1,15 +1,12 @@
 #!/bin/bash
 
 # -----------------------------------------------------------------------------
-# 适用于 Ubuntu 24 的交互式 VPS 初始化脚本 (Root 运行版) v11
+# 适用于 Ubuntu 24 的交互式 VPS 初始化脚本 (Root 运行版) v12
 #
 # 变更日志:
-# 1. (v11) [修复] 彻底重构 'task_configure_zsh' 逻辑：
-#           - 1. 先运行 Zim 安装器创建默认 .zimrc。
-#           - 2. 使用 sed 将 zmodule 插入到 'source zimfw.zsh' 之前。
-#           - 3. 手动运行 'zimfw install' 来安装模块。
-#           - 4. (加固) 检查 chsh 失败时的 PAM 认证问题。
-# 2. (v10) [修复] 调整 v9 的 Zsh 和 P10k 安装顺序。
+# 1. (v12) [修复] 修复 'zimfw install' 时 "ZIM_HOME not defined" 错误。
+#           - 必须 source .zimrc (而不是 zimfw.zsh) 来加载 ZIM_HOME 变量。
+# 2. (v11) [修复] 彻底重构 'task_configure_zsh' 逻辑以遵循 Zim 的加载顺序。
 # 3. (v9) [新增] P10K_CONFIG_URL 变量。
 # 4. (v9) [新增] 启动时 'task_check_status' 状态检查。
 # -----------------------------------------------------------------------------
@@ -137,13 +134,13 @@ task_setup_swapfile() {
 }
 
 # 3. 配置 Zsh (双目标: root + ubuntu)
-# [v11 修复] 彻底重构 Zsh 和 P10k 的安装逻辑
+# [v12 修复] 'zimfw install'
 _install_zsh_for_user() {
     local ZIM_USER="$1"
     local ZIM_HOME="$2"
     local P10K_FILE="$ZIM_HOME/.p10k.zsh"
     local ZIM_RC_FILE="$ZIM_HOME/.zimrc"
-    local ZIM_FW_SH="$ZIM_HOME/.zim/zimfw.zsh"
+    local ZIM_FW_SH="$ZIM_HOME/.zim/zimfw.zsh" # v11 遗留变量，v12 已不再直接 source 它
 
     if ! id "$ZIM_USER" >/dev/null 2>&1; then
         warn "用户 $ZIM_USER 不存在。跳过为其配置 Zsh。"
@@ -156,18 +153,22 @@ _install_zsh_for_user() {
     
     info "--- 正在为 [$ZIM_USER] (家: $ZIM_HOME) 配置 Zsh ---"
 
-    # 步骤 1：下载 P10k 配置文件 (这必须在 Zim 安装器运行 *之前* 完成)
+    # 步骤 1：下载 P10k 配置文件
     if [ -n "$P10K_CONFIG_URL" ] && [ "$P10K_CONFIG_URL" != "YOUR_P10K_RAW_URL_HERE" ]; then
-        info "--- 正在为 [$ZIM_USER] 下载自定义 .p10k.zsh ---"
-        if sudo -u "$ZIM_USER" curl -fsSL "$P10K_CONFIG_URL" -o "$P10K_FILE"; then
-            if [ -s "$P10K_FILE" ]; then
-                success "已为 [$ZIM_USER] 部署 .p10k.zsh。"
+        if [ ! -f "$P10K_FILE" ] || [ $(stat -c%s "$P10K_FILE") -lt 1000 ]; then
+            info "--- 正在为 [$ZIM_USER] 下载自定义 .p10k.zsh ---"
+            if sudo -u "$ZIM_USER" curl -fsSL "$P10K_CONFIG_URL" -o "$P10K_FILE"; then
+                if [ -s "$P10K_FILE" ]; then
+                    success "已为 [$ZIM_USER] 部署 .p10k.zsh。"
+                else
+                    error "为 [$ZIM_USER] 下载 .p10k.zsh 失败 (文件为空)。"
+                    sudo -u "$ZIM_USER" rm -f "$P10K_FILE" 
+                fi
             else
-                error "为 [$ZIM_USER] 下载 .p10k.zsh 失败 (文件为空)。"
-                sudo -u "$ZIM_USER" rm -f "$P10K_FILE" # 删除空文件
+                error "为 [$ZIM_USER] 下载 .p10k.zsh 失败 (curl 错误)。"
             fi
         else
-            error "为 [$ZIM_USER] 下载 .p10k.zsh 失败 (curl 错误)。"
+             info ".p10k.zsh 已为 [$ZIM_USER] 存在。"
         fi
     else
         if [ "$ZIM_USER" == "root" ]; then
@@ -178,12 +179,8 @@ _install_zsh_for_user() {
     # 步骤 2：如果 Zim 未安装，则运行标准安装器
     if [ ! -d "$ZIM_HOME/.zim" ]; then
         info "为 [$ZIM_USER] 运行 Zim 框架安装器 (首次)..."
-        # 运行 Zim 安装器，它会创建默认的 .zshrc 和 .zimrc
-        # 我们忽略它的 chsh 失败，因为我们稍后会自己处理
         sudo -u "$ZIM_USER" ZDOTDIR="$ZIM_HOME" zsh -c "curl -fsSL https://raw.githubusercontent.com/zimfw/install/master/install.zsh | zsh" >/dev/null 2>&1
-        
-        # 验证安装是否创建了 zimfw.zsh
-        if [ ! -f "$ZIM_FW_SH" ]; then
+        if [ ! -f "$ZIM_RC_FILE" ]; then
             error "Zim 框架为 [$ZIM_USER] 安装失败。中止 Zsh 配置。"
             return 1
         fi
@@ -198,31 +195,24 @@ _install_zsh_for_user() {
     
     if ! sudo -u "$ZIM_USER" grep -q "$MODULE_LINE" "$ZIM_RC_FILE"; then
         info "正在将 P10k 模块添加到 [$ZIM_USER] 的 .zimrc..."
-        # 使用 sed 在 'source...zimfw.zsh' 行 *之前* 插入模块定义
-        # (使用 \n 来确保新行)
         sudo -u "$ZIM_USER" sed -i "\|$SOURCE_LINE_PATTERN|i \n$MODULE_LINE\n" "$ZIM_RC_FILE"
         success "P10k 模块已添加到 .zimrc。"
     else
         info "P10k 模块已在 [$ZIM_USER] 的 .zimrc 中定义。"
     fi
 
-    # 步骤 4：(核心修复) 手动运行 'zimfw install' 来拉取和编译模块
+    # 步骤 4：(v12 核心修复) 运行 'zimfw install'
+    # 必须 source .zimrc 来加载 ZIM_HOME 和 zimfw 函数
     info "正在为 [$ZIM_USER] 运行 'zimfw install'..."
-    # 必须作为该用户运行，并设置 ZDOTDIR
-    if sudo -u "$ZIM_USER" ZDOTDIR="$ZIM_HOME" zsh -c "source $ZIM_FW_SH install"; then
+    if sudo -u "$ZIM_USER" ZDOTDIR="$ZIM_HOME" zsh -c "source $ZIM_RC_FILE; zimfw install"; then
         success "Zim 模块 (P10k) 已为 [$ZIM_USER] 安装/更新。"
     else
-        error "Zim 模块为 [$ZIM_USER] 安装失败。"
+        error "Zim 模块为 [$ZIM_USER] 安装失败。 (请检查 $ZIM_RC_FILE)"
     fi
 
     # 步骤 5：设置默认 Shell
-    # (Zim 安装器可能会因 PAM 失败，我们在这里作为 root 强制执行)
     if [ "$(getent passwd "$ZIM_USER" | cut -d: -f7)" != "$(which zsh)" ]; then
         info "更改 [$ZIM_USER] 的默认 shell 为 zsh..."
-        # [v11 加固] 处理 PAM 认证失败 (chsh: PAM: Authentication failure)
-        # 这个问题通常发生在 'su' 或 'sudo -i' 会话中，而不是
-        # 'sudo -u'。我们的脚本作为 root 运行，chsh 应该总能成功。
-        # 如果它失败了，这通常与 /etc/pam.d/chsh 的配置有关。
         chsh -s "$(which zsh)" "$ZIM_USER"
         if [ $? -eq 0 ]; then
              success "[$ZIM_USER] 的 shell 已更改。"
@@ -238,15 +228,13 @@ task_configure_zsh() {
     info "3. 开始配置 Zsh, Zim 和 Powerlevel10k..."
     
     if ! command -v zsh >/dev/null 2>&1; then
-        apt-get install -y zsh
+        apt-get install -y zsh zsh-common
     else
         info "Zsh 已安装。"
     fi
 
-    # 您的日志显示 Zim 仍然在抱怨这个。让我们确保我们的修补是稳健的。
     if [ -f "/etc/zsh/zshrc" ] && grep -q "^\s*compinit" "/etc/zsh/zshrc"; then
         info "修补 /etc/zsh/zshrc 以防止 'compinit' 冲突..."
-        # 确保我们注释掉 *所有* 匹配的行
         sed -i 's/^\s*compinit/#&/' /etc/zsh/zshrc
         if ! grep -q "^\s*compinit" "/etc/zsh/zshrc"; then
              success "/etc/zsh/zshrc 修补完成。"
@@ -272,7 +260,7 @@ task_optimize_network_bbr() {
         info "BBR 似乎已配置。"
     else
         info "写入 BBR 配置到 /etc/sysctl.conf..."
-        echo "$BBR_CONF_1" | tee -a /etc/sysctl.conf
+        echo "$BB_CONF_1" | tee -a /etc/sysctl.conf
         echo "$BBR_CONF_2" | tee -a /etc/sysctl.conf
         info "应用配置..."
         sysctl -p >/dev/null 2>&1
