@@ -1,19 +1,17 @@
 #!/bin/bash
 
 # -----------------------------------------------------------------------------
-# 适用于 Ubuntu 24 的交互式 VPS 初始化脚本 (Root 运行版) v9
+# 适用于 Ubuntu 24 的交互式 VPS 初始化脚本 (Root 运行版) v10
 #
 # 变更日志:
-# 1. (v9) [新增] P10K_CONFIG_URL 变量，用于从 URL 自动下载 p10k 配置。
-# 2. (v9) [新增] 启动时 'task_check_status' 状态检查 (Swap, BBR, Docker, TZ)。
-# 3. (v7) [新增] 'task_set_timezone' 函数。
-# 4. (v6) [优化] Docker 安装改用官方 'get.docker.com' 脚本。
-# 5. (v5) [移除] 移除 Zram (因 Oracle 内核不兼容)。
-# 6. (v5) [调整] Swapfile 增加到 2G。
+# 1. (v10) [修复] 调整 'task_configure_zsh' 逻辑：
+#           - 必须先下载 .p10k.zsh，然后再运行 zimfw install。
+#           - 增加文件大小检查 [ -s ] 确保下载不为空。
+# 2. (v9) [新增] P10K_CONFIG_URL 变量。
+# 3. (v9) [新增] 启动时 'task_check_status' 状态检查。
 # -----------------------------------------------------------------------------
 
 # --- [v9] 配置变量 ---
-# 已填入您提供的 .p10k.zsh "Raw" 链接
 P10K_CONFIG_URL="https://raw.githubusercontent.com/SakenTam/vps-init/refs/heads/main/.p10k.zsh"
 
 
@@ -29,25 +27,19 @@ NC='\033[0m' # No Color
 info() {
     echo -e "${BLUE}[INFO] $1${NC}"
 }
-
 success() {
     echo -e "${GREEN}[SUCCESS] $1${NC}"
 }
-
 warn() {
     echo -e "${YELLOW}[WARNING] $1${NC}"
 }
-
 error() {
     echo -e "${RED}[ERROR] $1${NC}" >&2
 }
-
-# [v9 新增] 状态检查专用的打印函数
 status_check() {
     local status_name="$1"
     local status_value="$2"
     local status_color="$3"
-    # 使用 printf 保证对齐
     printf "    %-10s : %b\n" "$status_name" "${status_color}${status_value}${NC}"
 }
 
@@ -61,7 +53,7 @@ pre_check() {
     success "以 Root 权限运行，检查通过。"
 }
 
-# --- [v9 新增] 启动状态检查 ---
+# --- [v9] 启动状态检查 ---
 task_check_status() {
     echo -e "\n${CYAN}--- 正在检查当前系统状态 ---${NC}"
     
@@ -117,6 +109,7 @@ task_install_base() {
 # 2. 配置 2G Swapfile
 task_setup_swapfile() {
     info "2. 开始配置 2G Swapfile..."
+    # (此处省略 v9 中未改动的代码)
     if swapon -s | grep -q '/swapfile'; then
         info "Swapfile 似乎已激活。"
     else
@@ -131,27 +124,22 @@ task_setup_swapfile() {
         swapon /swapfile
         info "Swapfile 已激活。"
     fi
-    
     if ! grep -q "swapfile" /etc/fstab; then
-        info "添加 Swapfile 到 /etc/fstab 以实现开机自启..."
         echo '/swapfile none swap sw 0 0' | tee -a /etc/fstab
-    else
-        info "/etc/fstab 中已包含 Swapfile 配置。"
     fi
-    
     if ! grep -q "vm.swappiness=60" /etc/sysctl.conf; then
          echo 'vm.swappiness=60' | tee -a /etc/sysctl.conf
          sysctl -p >/dev/null 2>&1
     fi
-    
     success "Swapfile 配置完成。"
 }
 
 # 3. 配置 Zsh (双目标: root + ubuntu)
-# [v9 改造] _install_zsh_for_user
+# [v10 修复] 调整 Zsh 和 P10k 的安装顺序
 _install_zsh_for_user() {
     local ZIM_USER="$1"
     local ZIM_HOME="$2"
+    local P10K_FILE="$ZIM_HOME/.p10k.zsh"
 
     if ! id "$ZIM_USER" >/dev/null 2>&1; then
         warn "用户 $ZIM_USER 不存在。跳过为其配置 Zsh。"
@@ -164,14 +152,37 @@ _install_zsh_for_user() {
     
     info "--- 正在为 [$ZIM_USER] (家: $ZIM_HOME) 配置 Zsh ---"
 
+    # [v10 修正] 步骤 1：必须先下载 P10k 配置文件
+    if [ -n "$P10K_CONFIG_URL" ] && [ "$P10K_CONFIG_URL" != "YOUR_P10K_RAW_URL_HERE" ]; then
+        info "--- 正在为 [$ZIM_USER] 下载自定义 .p10k.zsh ---"
+        # 作为该用户下载，以确保正确的文件所有权
+        if sudo -u "$ZIM_USER" curl -fsSL "$P10K_CONFIG_URL" -o "$P10K_FILE"; then
+            # [v10 加固] 验证文件是否下载成功且不为空
+            if [ -s "$P10K_FILE" ]; then
+                success "已为 [$ZIM_USER] 部署自定义 .p10k.zsh。"
+            else
+                error "为 [$ZIM_USER] 下载 .p10k.zsh 失败 (文件为空)。"
+                sudo -u "$ZIM_USER" rm "$P10K_FILE" # 删除空文件
+            fi
+        else
+            error "为 [$ZIM_USER] 下载 .p10k.zsh 失败 (curl 错误)。将使用 P10k 默认向导。"
+        fi
+    else
+        if [ "$ZIM_USER" == "root" ]; then # 只警告一次
+             warn "P10K_CONFIG_URL 未设置。用户首次登录时需要手动配置 P10k。"
+        fi
+    fi
+
+    # [v10 修正] 步骤 2：现在才运行 Zim 安装
     if [ ! -d "$ZIM_HOME/.zim" ]; then
-        info "为 $ZIM_USER 预配置 p10k 模块..."
+        info "为 $ZIM_USER 预配置 p10k 模块 (.zimrc)..."
         sudo -u "$ZIM_USER" touch "$ZIM_HOME/.zimrc"
         if ! sudo -u "$ZIM_USER" grep -q "romkatv/powerlevel10k" "$ZIM_HOME/.zimrc"; then
             echo "zmodule romkatv/powerlevel10k" | sudo -u "$ZIM_USER" tee -a "$ZIM_HOME/.zimrc" > /dev/null
         fi
 
         info "为 $ZIM_USER 运行 Zim 框架安装器..."
+        # Zim 安装器现在会检测到 .p10k.zsh 并自动使用它
         sudo -u "$ZIM_USER" ZDOTDIR="$ZIM_HOME" zsh -c "curl -fsSL https://raw.githubusercontent.com/zimfw/install/master/install.zsh | zsh"
         
         info "Zim 框架已为 $ZIM_USER 安装。"
@@ -179,26 +190,15 @@ _install_zsh_for_user() {
         info "Zim 框架已为 $ZIM_USER 安装。"
     fi
 
-    # [v9 新增] 检查 P10K_CONFIG_URL 并下载
-    if [ -n "$P10K_CONFIG_URL" ] && [ "$P10K_CONFIG_URL" != "YOUR_P10K_RAW_URL_HERE" ]; then
-        info "--- 正在为 [$ZIM_USER] 从 GitHub 下载自定义 .p10k.zsh ---"
-        # 作为该用户下载，以确保正确的文件所有权
-        if sudo -u "$ZIM_USER" curl -fsSL "$P10K_CONFIG_URL" -o "$ZIM_HOME/.p10k.zsh"; then
-            success "已为 [$ZIM_USER] 部署自定义 .p10k.zsh。"
-        else
-            error "为 [$ZIM_USER] 下载 .p10k.zsh 失败。将使用 P10k 默认向导。"
-        fi
-    else
-        # 如果 URL 未配置，则发出警告
-        if [ "$ZIM_USER" == "root" ]; then # 只警告一次
-             warn "P10K_CONFIG_URL 未设置。用户首次登录时需要手动配置 P10k。"
-        fi
-    fi
-
+    # [v10 修正] 步骤 3：设置默认 Shell
     if [ "$(getent passwd "$ZIM_USER" | cut -d: -f7)" != "$(which zsh)" ]; then
         info "更改 $ZIM_USER 的默认 shell 为 zsh..."
         chsh -s "$(which zsh)" "$ZIM_USER"
-        success "[$ZIM_USER] 的 shell 已更改。"
+        if [ $? -eq 0 ]; then
+             success "[$ZIM_USER] 的 shell 已更改。"
+        else
+             error "[$ZIM_USER] 的 shell 更改失败。请检查系统日志。"
+        fi
     else
         info "[$ZIM_USER] 的默认 shell 已经是 zsh。"
     fi
@@ -230,9 +230,9 @@ task_configure_zsh() {
 # 4. 开启 BBR
 task_optimize_network_bbr() {
     info "4. 开始启用 BBR..."
+    # (此处省略 v9 中未改动的代码)
     local BBR_CONF_1="net.core.default_qdisc=fq"
     local BBR_CONF_2="net.ipv4.tcp_congestion_control=bbr"
-    
     if grep -q "$BBR_CONF_2" /etc/sysctl.conf; then
         info "BBR 似乎已配置。"
     else
@@ -242,7 +242,6 @@ task_optimize_network_bbr() {
         info "应用配置..."
         sysctl -p >/dev/null 2>&1
     fi
-    
     info "检查 BBR 状态..."
     if sysctl net.ipv4.tcp_congestion_control 2>/dev/null | grep -q "bbr"; then
         success "BBR 已成功启用。"
@@ -254,18 +253,16 @@ task_optimize_network_bbr() {
 # 5. 配置 UFW 防火墙
 task_configure_ufw() {
     info "5. 开始配置 UFW 防火墙..."
+    # (此处省略 v9 中未改动的代码)
     if ! command -v ufw >/dev/null 2>&1; then
         apt-get install -y ufw
     fi
-    
     ufw default deny incoming
     ufw default allow outgoing
-    
     info "设置 UFW 规则 (Limit 22/tcp, Allow 80/tcp, Allow 443/tcp)..."
     ufw limit 22/tcp comment 'SSH'
     ufw allow 80/tcp comment 'HTTP'
     ufw allow 443/tcp comment 'HTTPS'
-    
     info "启用 UFW..."
     if ufw --force enable; then
         success "UFW 已启用并配置完成。"
@@ -278,7 +275,7 @@ task_configure_ufw() {
 # 6. (可选) 安装 Docker
 task_install_docker_optional() {
     info "6. 检查是否安装 Docker..."
-    
+    # (此处省略 v9 中未改动的代码)
     read -p "您是否希望安装 Docker? (y/N) " choice
     case "$choice" in 
       y|Y )
@@ -291,31 +288,24 @@ task_install_docker_optional() {
             fi
         else
             info "开始使用 Docker 官方脚本安装 Docker..."
-            
             curl -fsSL https://get.docker.com -o get-docker.sh
-            
             if [ ! -f "get-docker.sh" ]; then
                 error "下载 Docker 安装脚本失败。"
                 return 1
             fi
-            
             sh get-docker.sh
             rm get-docker.sh
-            
             if [ ! -f "/usr/bin/docker" ]; then
                  error "Docker 安装失败。请检查上面的日志。"
                  return 1
             fi
-            
             info "启动并启用 Docker 服务..."
             systemctl enable docker
             systemctl start docker
-            
             if id "ubuntu" >/dev/null 2>&1; then
                 info "将用户 'ubuntu' 添加到 'docker' 组..."
                 usermod -aG docker "ubuntu"
             fi
-            
             success "Docker (及 Docker Compose) 安装完成。"
             warn "用户 'ubuntu' 需要退出并重新登录，才能无需 sudo 运行 docker 命令。"
         fi
@@ -329,11 +319,9 @@ task_install_docker_optional() {
 # 7. [V7 新增] 更改时区
 task_set_timezone() {
     info "7. 更改时区为 Asia/Shanghai..."
+    # (此处省略 v9 中未改动的代码)
     local TARGET_TZ="Asia/Shanghai"
-    
-    # timedatectl status (新版) 或 timedatectl (旧版)
     local current_tz=$(timedatectl | grep "Time zone" | awk '{print $3}')
-    
     if [ "$current_tz" == "$TARGET_TZ" ]; then
         info "时区已是 $TARGET_TZ。"
     else
@@ -345,7 +333,6 @@ task_set_timezone() {
             return 1
         fi
     fi
-    
     info "验证当前时间："
     timedatectl | grep "Time zone"
     success "时区设置完成。"
@@ -403,7 +390,6 @@ show_submenu() {
 
 show_main_menu() {
     while true;
-        # [v9 新增] 每次显示主菜单时，都刷新状态
         do
         clear # 清屏
         echo -e "\n${GREEN}=========================================${NC}"
@@ -411,7 +397,7 @@ show_main_menu() {
         echo -e "${GREEN}        (必须以 Root 身份运行)${NC}"
         echo -e "${GREEN}=========================================${NC}"
         
-        task_check_status # <-- v9 新增的状态检查
+        task_check_status # <-- v9 状态检查
         
         echo ""
         echo "请选择您的操作模式:"
