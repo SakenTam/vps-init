@@ -1,46 +1,37 @@
 #!/bin/bash
 
 # -----------------------------------------------------------------------------
-# 适用于 Ubuntu 24 的交互式 VPS 初始化脚本 (Root 运行版) v12
+# 适用于 Ubuntu 24 的交互式 VPS 初始化脚本 (Root 运行版) v7
 #
 # 变更日志:
-# 1. (v12) [修复] 修复 'zimfw install' 时 "ZIM_HOME not defined" 错误。
-#           - 必须 source .zimrc (而不是 zimfw.zsh) 来加载 ZIM_HOME 变量。
-# 2. (v11) [修复] 彻底重构 'task_configure_zsh' 逻辑以遵循 Zim 的加载顺序。
-# 3. (v9) [新增] P10K_CONFIG_URL 变量。
-# 4. (v9) [新增] 启动时 'task_check_status' 状态检查。
+# 1. (v7) [新增] 添加 'task_set_timezone' 函数，用于设置时区为 Asia/Shanghai。
+# 2. (v6) [优化] Docker 安装改用官方 'get.docker.com' 脚本。
+# 3. (v5) [移除] 移除 Zram (因 Oracle 内核不兼容)。
+# 4. (v5) [调整] Swapfile 增加到 2G。
 # -----------------------------------------------------------------------------
-
-# --- [v9] 配置变量 ---
-P10K_CONFIG_URL="https://raw.githubusercontent.com/SakenTam/vps-init/refs/heads/main/.p10k.zsh"
-
 
 # --- 颜色定义 ---
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[0;33m'
 BLUE='\033[0;34m'
-CYAN='\033[0;36m'
 NC='\033[0m' # No Color
 
 # --- 助手函数 ---
 info() {
     echo -e "${BLUE}[INFO] $1${NC}"
 }
+
 success() {
     echo -e "${GREEN}[SUCCESS] $1${NC}"
 }
+
 warn() {
     echo -e "${YELLOW}[WARNING] $1${NC}"
 }
+
 error() {
     echo -e "${RED}[ERROR] $1${NC}" >&2
-}
-status_check() {
-    local status_name="$1"
-    local status_value="$2"
-    local status_color="$3"
-    printf "    %-10s : %b\n" "$status_name" "${status_color}${status_value}${NC}"
 }
 
 # --- 安全检查 (Root 运行) ---
@@ -52,49 +43,6 @@ pre_check() {
     fi
     success "以 Root 权限运行，检查通过。"
 }
-
-# --- [v9] 启动状态检查 ---
-task_check_status() {
-    echo -e "\n${CYAN}--- 正在检查当前系统状态 ---${NC}"
-    
-    # 1. 检查 Swap
-    if swapon -s | grep -q '/swapfile'; then
-        local swap_size=$(free -h | grep Swap | awk '{print $2}')
-        status_check "Swap" "Active ($swap_size)" "$GREEN"
-    else
-        status_check "Swap" "Inactive" "$YELLOW"
-    fi
-    
-    # 2. 检查 BBR
-    local bbr_status=$(sysctl net.ipv4.tcp_congestion_control 2>/dev/null)
-    if echo "$bbr_status" | grep -q "bbr"; then
-        status_check "BBR" "Enabled (bbr)" "$GREEN"
-    else
-        status_check "BBR" "Disabled" "$YELLOW"
-    fi
-
-    # 3. 检查 Docker
-    if command -v docker >/dev/null 2>&1; then
-        if systemctl is-active --quiet docker; then
-             status_check "Docker" "Installed & Running" "$GREEN"
-        else
-             status_check "Docker" "Installed (Not Running)" "$YELLOW"
-        fi
-    else
-        status_check "Docker" "Not Installed" "$RED"
-    fi
-
-    # 4. 检查时区
-    local current_tz=$(timedatectl | grep "Time zone" | awk '{print $3}')
-    if [ "$current_tz" == "Asia/Shanghai" ]; then
-        status_check "Timezone" "$current_tz" "$GREEN"
-    else
-        status_check "Timezone" "$current_tz (非上海)" "$YELLOW"
-    fi
-    
-    echo -e "${CYAN}----------------------------------${NC}"
-}
-
 
 # --- 任务函数 (模块化 & 幂等) ---
 
@@ -123,24 +71,26 @@ task_setup_swapfile() {
         swapon /swapfile
         info "Swapfile 已激活。"
     fi
+    
     if ! grep -q "swapfile" /etc/fstab; then
+        info "添加 Swapfile 到 /etc/fstab 以实现开机自启..."
         echo '/swapfile none swap sw 0 0' | tee -a /etc/fstab
+    else
+        info "/etc/fstab 中已包含 Swapfile 配置。"
     fi
+    
     if ! grep -q "vm.swappiness=60" /etc/sysctl.conf; then
          echo 'vm.swappiness=60' | tee -a /etc/sysctl.conf
          sysctl -p >/dev/null 2>&1
     fi
+    
     success "Swapfile 配置完成。"
 }
 
 # 3. 配置 Zsh (双目标: root + ubuntu)
-# [v12 修复] 'zimfw install'
 _install_zsh_for_user() {
     local ZIM_USER="$1"
     local ZIM_HOME="$2"
-    local P10K_FILE="$ZIM_HOME/.p10k.zsh"
-    local ZIM_RC_FILE="$ZIM_HOME/.zimrc"
-    local ZIM_FW_SH="$ZIM_HOME/.zim/zimfw.zsh" # v11 遗留变量，v12 已不再直接 source 它
 
     if ! id "$ZIM_USER" >/dev/null 2>&1; then
         warn "用户 $ZIM_USER 不存在。跳过为其配置 Zsh。"
@@ -153,72 +103,25 @@ _install_zsh_for_user() {
     
     info "--- 正在为 [$ZIM_USER] (家: $ZIM_HOME) 配置 Zsh ---"
 
-    # 步骤 1：下载 P10k 配置文件
-    if [ -n "$P10K_CONFIG_URL" ] && [ "$P10K_CONFIG_URL" != "YOUR_P10K_RAW_URL_HERE" ]; then
-        if [ ! -f "$P10K_FILE" ] || [ $(stat -c%s "$P10K_FILE") -lt 1000 ]; then
-            info "--- 正在为 [$ZIM_USER] 下载自定义 .p10k.zsh ---"
-            if sudo -u "$ZIM_USER" curl -fsSL "$P10K_CONFIG_URL" -o "$P10K_FILE"; then
-                if [ -s "$P10K_FILE" ]; then
-                    success "已为 [$ZIM_USER] 部署 .p10k.zsh。"
-                else
-                    error "为 [$ZIM_USER] 下载 .p10k.zsh 失败 (文件为空)。"
-                    sudo -u "$ZIM_USER" rm -f "$P10K_FILE" 
-                fi
-            else
-                error "为 [$ZIM_USER] 下载 .p10k.zsh 失败 (curl 错误)。"
-            fi
-        else
-             info ".p10k.zsh 已为 [$ZIM_USER] 存在。"
-        fi
-    else
-        if [ "$ZIM_USER" == "root" ]; then
-             warn "P10K_CONFIG_URL 未设置。用户将需要手动配置 P10k。"
-        fi
-    fi
-
-    # 步骤 2：如果 Zim 未安装，则运行标准安装器
     if [ ! -d "$ZIM_HOME/.zim" ]; then
-        info "为 [$ZIM_USER] 运行 Zim 框架安装器 (首次)..."
-        sudo -u "$ZIM_USER" ZDOTDIR="$ZIM_HOME" zsh -c "curl -fsSL https://raw.githubusercontent.com/zimfw/install/master/install.zsh | zsh" >/dev/null 2>&1
-        if [ ! -f "$ZIM_RC_FILE" ]; then
-            error "Zim 框架为 [$ZIM_USER] 安装失败。中止 Zsh 配置。"
-            return 1
+        info "为 $ZIM_USER 预配置 p10k 模块..."
+        sudo -u "$ZIM_USER" touch "$ZIM_HOME/.zimrc"
+        if ! sudo -u "$ZIM_USER" grep -q "romkatv/powerlevel10k" "$ZIM_HOME/.zimrc"; then
+            echo "zmodule romkatv/powerlevel10k" | sudo -u "$ZIM_USER" tee -a "$ZIM_HOME/.zimrc" > /dev/null
         fi
-        info "Zim 框架已为 [$ZIM_USER] 安装。"
+
+        info "为 $ZIM_USER 运行 Zim 框架安装器..."
+        sudo -u "$ZIM_USER" ZDOTDIR="$ZIM_HOME" zsh -c "curl -fsSL https://raw.githubusercontent.com/zimfw/install/master/install.zsh | zsh"
+        
+        info "Zim 框架及 P10k 已为 $ZIM_USER 安装。"
     else
-        info "Zim 框架已为 [$ZIM_USER] 安装。"
+        info "Zim 框架已为 $ZIM_USER 安装。"
     fi
 
-    # 步骤 3：(核心修复) 将 p10k 模块定义 *插入* 到 .zimrc 中 'source' 行的 *之前*
-    local MODULE_LINE="zmodule romkatv/powerlevel10k"
-    local SOURCE_LINE_PATTERN="source.*zimfw.zsh"
-    
-    if ! sudo -u "$ZIM_USER" grep -q "$MODULE_LINE" "$ZIM_RC_FILE"; then
-        info "正在将 P10k 模块添加到 [$ZIM_USER] 的 .zimrc..."
-        sudo -u "$ZIM_USER" sed -i "\|$SOURCE_LINE_PATTERN|i \n$MODULE_LINE\n" "$ZIM_RC_FILE"
-        success "P10k 模块已添加到 .zimrc。"
-    else
-        info "P10k 模块已在 [$ZIM_USER] 的 .zimrc 中定义。"
-    fi
-
-    # 步骤 4：(v12 核心修复) 运行 'zimfw install'
-    # 必须 source .zimrc 来加载 ZIM_HOME 和 zimfw 函数
-    info "正在为 [$ZIM_USER] 运行 'zimfw install'..."
-    if sudo -u "$ZIM_USER" ZDOTDIR="$ZIM_HOME" zsh -c "source $ZIM_RC_FILE; zimfw install"; then
-        success "Zim 模块 (P10k) 已为 [$ZIM_USER] 安装/更新。"
-    else
-        error "Zim 模块为 [$ZIM_USER] 安装失败。 (请检查 $ZIM_RC_FILE)"
-    fi
-
-    # 步骤 5：设置默认 Shell
     if [ "$(getent passwd "$ZIM_USER" | cut -d: -f7)" != "$(which zsh)" ]; then
-        info "更改 [$ZIM_USER] 的默认 shell 为 zsh..."
+        info "更改 $ZIM_USER 的默认 shell 为 zsh..."
         chsh -s "$(which zsh)" "$ZIM_USER"
-        if [ $? -eq 0 ]; then
-             success "[$ZIM_USER] 的 shell 已更改。"
-        else
-             error "[$ZIM_USER] 的 shell 更改失败。请检查 /etc/pam.d/chsh 配置。"
-        fi
+        success "[$ZIM_USER] 的 shell 已更改。"
     else
         info "[$ZIM_USER] 的默认 shell 已经是 zsh。"
     fi
@@ -228,19 +131,15 @@ task_configure_zsh() {
     info "3. 开始配置 Zsh, Zim 和 Powerlevel10k..."
     
     if ! command -v zsh >/dev/null 2>&1; then
-        apt-get install -y zsh zsh-common
+        apt-get install -y zsh
     else
         info "Zsh 已安装。"
     fi
 
     if [ -f "/etc/zsh/zshrc" ] && grep -q "^\s*compinit" "/etc/zsh/zshrc"; then
         info "修补 /etc/zsh/zshrc 以防止 'compinit' 冲突..."
+        cp /etc/zsh/zshrc /etc/zsh/zshrc.bak-$(date +%F) >/dev/null 2>&1
         sed -i 's/^\s*compinit/#&/' /etc/zsh/zshrc
-        if ! grep -q "^\s*compinit" "/etc/zsh/zshrc"; then
-             success "/etc/zsh/zshrc 修补完成。"
-        else
-             warn "未能自动修补 /etc/zsh/zshrc。"
-        fi
     fi
 
     _install_zsh_for_user "root" "/root"
@@ -250,23 +149,24 @@ task_configure_zsh() {
     info "请相关用户 (root, ubuntu) 退出并重新登录以启用 Zsh。"
 }
 
-
 # 4. 开启 BBR
 task_optimize_network_bbr() {
     info "4. 开始启用 BBR..."
     local BBR_CONF_1="net.core.default_qdisc=fq"
     local BBR_CONF_2="net.ipv4.tcp_congestion_control=bbr"
+    
     if grep -q "$BBR_CONF_2" /etc/sysctl.conf; then
         info "BBR 似乎已配置。"
     else
         info "写入 BBR 配置到 /etc/sysctl.conf..."
-        echo "$BB_CONF_1" | tee -a /etc/sysctl.conf
+        echo "$BBR_CONF_1" | tee -a /etc/sysctl.conf
         echo "$BBR_CONF_2" | tee -a /etc/sysctl.conf
         info "应用配置..."
         sysctl -p >/dev/null 2>&1
     fi
+    
     info "检查 BBR 状态..."
-    if sysctl net.ipv4.tcp_congestion_control 2>/dev/null | grep -q "bbr"; then
+    if sysctl net.ipv4.tcp_congestion_control | grep -q "bbr"; then
         success "BBR 已成功启用。"
     else
         warn "BBR 未能立即启用，可能需要重启系统 (reboot)。"
@@ -279,12 +179,15 @@ task_configure_ufw() {
     if ! command -v ufw >/dev/null 2>&1; then
         apt-get install -y ufw
     fi
+    
     ufw default deny incoming
     ufw default allow outgoing
+    
     info "设置 UFW 规则 (Limit 22/tcp, Allow 80/tcp, Allow 443/tcp)..."
     ufw limit 22/tcp comment 'SSH'
     ufw allow 80/tcp comment 'HTTP'
     ufw allow 443/tcp comment 'HTTPS'
+    
     info "启用 UFW..."
     if ufw --force enable; then
         success "UFW 已启用并配置完成。"
@@ -297,6 +200,7 @@ task_configure_ufw() {
 # 6. (可选) 安装 Docker
 task_install_docker_optional() {
     info "6. 检查是否安装 Docker..."
+    
     read -p "您是否希望安装 Docker? (y/N) " choice
     case "$choice" in 
       y|Y )
@@ -309,24 +213,31 @@ task_install_docker_optional() {
             fi
         else
             info "开始使用 Docker 官方脚本安装 Docker..."
+            
             curl -fsSL https://get.docker.com -o get-docker.sh
+            
             if [ ! -f "get-docker.sh" ]; then
                 error "下载 Docker 安装脚本失败。"
                 return 1
             fi
+            
             sh get-docker.sh
             rm get-docker.sh
+            
             if [ ! -f "/usr/bin/docker" ]; then
                  error "Docker 安装失败。请检查上面的日志。"
                  return 1
             fi
+            
             info "启动并启用 Docker 服务..."
             systemctl enable docker
             systemctl start docker
+            
             if id "ubuntu" >/dev/null 2>&1; then
                 info "将用户 'ubuntu' 添加到 'docker' 组..."
                 usermod -aG docker "ubuntu"
             fi
+            
             success "Docker (及 Docker Compose) 安装完成。"
             warn "用户 'ubuntu' 需要退出并重新登录，才能无需 sudo 运行 docker 命令。"
         fi
@@ -341,7 +252,10 @@ task_install_docker_optional() {
 task_set_timezone() {
     info "7. 更改时区为 Asia/Shanghai..."
     local TARGET_TZ="Asia/Shanghai"
+    
+    # timedatectl status (新版) 或 timedatectl (旧版)
     local current_tz=$(timedatectl | grep "Time zone" | awk '{print $3}')
+    
     if [ "$current_tz" == "$TARGET_TZ" ]; then
         info "时区已是 $TARGET_TZ。"
     else
@@ -353,6 +267,7 @@ task_set_timezone() {
             return 1
         fi
     fi
+    
     info "验证当前时间："
     timedatectl | grep "Time zone"
     success "时区设置完成。"
@@ -369,7 +284,7 @@ run_all_tasks() {
     task_optimize_network_bbr
     task_configure_ufw
     task_install_docker_optional 
-    task_set_timezone
+    task_set_timezone  # <-- V7 新增
     success "--- 所有任务已执行完毕 ---"
 }
 
@@ -382,12 +297,12 @@ show_submenu() {
         echo "4. 启用 BBR 网络优化"
         echo "5. 配置 UFW 防火墙 (22, 80, 443)"
         echo "6. (可选) 安装 Docker (官方脚本)"
-        echo "7. 更改时区 (Asia/Shanghai)"
+        echo "7. 更改时区 (Asia/Shanghai)" # <-- V7 新增
         echo "-------------------------"
         echo "b. 返回主菜单"
         echo "q. 退出脚本"
         
-        read -p "请输入选项 [1-7, b, q]: " sub_choice
+        read -p "请输入选项 [1-7, b, q]: " sub_choice # <-- V7 调整
         
         case $sub_choice in
             1) task_install_base ;;
@@ -396,7 +311,7 @@ show_submenu() {
             4) task_optimize_network_bbr ;;
             5) task_configure_ufw ;;
             6) task_install_docker_optional ;;
-            7) task_set_timezone ;;
+            7) task_set_timezone ;; # <-- V7 新增
             b) break ;; 
             q) exit 0 ;;
             *) error "无效选项。" ;;
@@ -409,18 +324,13 @@ show_submenu() {
 }
 
 show_main_menu() {
-    while true;
-        do
-        clear # 清屏
+    while true; do
         echo -e "\n${GREEN}=========================================${NC}"
         echo -e "${GREEN}    Ubuntu 24 VPS 自动化初始化脚本${NC}"
         echo -e "${GREEN}        (必须以 Root 身份运行)${NC}"
         echo -e "${GREEN}=========================================${NC}"
-        
-        task_check_status # <-- v9 状态检查
-        
-        echo ""
         echo "请选择您的操作模式:"
+        echo ""
         echo "1. 安装全部所需 (推荐首次运行)"
         echo "2. 按分类安装 (选择性执行任务)"
         echo "q. 退出"
@@ -440,7 +350,6 @@ show_main_menu() {
                 ;;
             *)
                 error "无效选项，请重新输入。"
-                sleep 2
                 ;;
         esac
     done
