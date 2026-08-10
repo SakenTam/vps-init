@@ -4,6 +4,7 @@ set -euo pipefail
 SSH_PORT=22
 WEB_PORTS="80 443"
 ALLOW_PING=1
+ENABLE_BBR=1
 INIT_USER="${SUDO_USER:-ubuntu}"
 
 C_RED='\033[0;31m'
@@ -82,6 +83,23 @@ setup_docker() {
     warn "用户 $INIT_USER 不存在，跳过加入 docker 组"
   fi
   ok "Docker 安装完成"
+}
+
+setup_bbr() {
+  if [ "$ENABLE_BBR" != "1" ]; then
+    return
+  fi
+  info "启用 BBR 加速..."
+  if ! grep -q bbr /proc/sys/net/ipv4/tcp_available_congestion_control 2>/dev/null; then
+    warn "当前内核不支持 BBR，跳过"
+    return
+  fi
+  cat > /etc/sysctl.d/99-bbr.conf <<'EOF'
+net.core.default_qdisc=fq
+net.ipv4.tcp_congestion_control=bbr
+EOF
+  sysctl --system > /dev/null
+  ok "BBR 已启用（当前算法：$(sysctl -n net.ipv4.tcp_congestion_control)）"
 }
 
 setup_firewall() {
@@ -174,6 +192,7 @@ main() {
   install_base_tools
   setup_caddy
   setup_docker
+  setup_bbr
   setup_firewall
   start_docker
   summary

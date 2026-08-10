@@ -8,6 +8,7 @@ Oracle Cloud Ubuntu 服务器一键初始化脚本。重装系统后快速完成
 - **基础工具**：curl、wget、git、vim、net-tools、tmux、dnsutils、apt-transport-https、neofetch、btop（另装依赖：gnupg、ca-certificates）
 - **Caddy**：官方 apt 源安装，开机自启
 - **Docker**：Docker CE + Compose 插件（官方源），自动将当前用户加入 `docker` 组
+- **BBR**：启用 Google BBR 拥塞控制加速（内核不支持时自动跳过）
 - **防火墙**：iptables 仅开放 22/80/443 端口，FORWARD 保持放行（不影响 Docker 容器网络），通过 `netfilter-persistent` 持久化
 
 ## 使用前提
@@ -49,6 +50,7 @@ sudo ./init-server.sh
 SSH_PORT=22          # SSH 端口
 WEB_PORTS="80 443"   # 开放的 Web 端口
 ALLOW_PING=1         # 1=允许 ping，0=拒绝
+ENABLE_BBR=1         # 1=启用 BBR，0=禁用
 ```
 
 ## 注意事项
