@@ -5,7 +5,7 @@ Oracle Cloud Ubuntu 服务器一键初始化脚本。重装系统后快速完成
 ## 功能特性
 
 - **系统更新**：`apt update && apt upgrade`
-- **基础工具**：curl、wget、git、vim、net-tools、tmux、dnsutils、apt-transport-https、neofetch、btop
+- **基础工具**：curl、wget、git、vim、net-tools、tmux、dnsutils、apt-transport-https、neofetch、btop（另装依赖：gnupg、ca-certificates）
 - **Caddy**：官方 apt 源安装，开机自启
 - **Docker**：Docker CE + Compose 插件（官方源），自动将当前用户加入 `docker` 组
 - **防火墙**：iptables 仅开放 22/80/443 端口，FORWARD 保持放行（不影响 Docker 容器网络），通过 `netfilter-persistent` 持久化

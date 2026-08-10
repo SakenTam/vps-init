@@ -41,8 +41,10 @@ update_system() {
 }
 
 install_base_tools() {
-  info "安装基础工具..."
   export DEBIAN_FRONTEND=noninteractive
+  info "安装仓库依赖（gpg、CA 证书）..."
+  apt-get install -y gnupg ca-certificates
+  info "安装基础工具..."
   apt-get install -y curl wget git vim net-tools tmux dnsutils apt-transport-https neofetch btop
   ok "基础工具安装完成"
 }
@@ -132,9 +134,13 @@ start_docker() {
   if systemctl is-active --quiet docker; then
     systemctl restart docker
   else
-    systemctl enable --now docker > /dev/null 2>&1 || true
+    systemctl enable --now docker
   fi
-  ok "Docker 已启动"
+  if systemctl is-active --quiet docker; then
+    ok "Docker 已启动"
+  else
+    warn "Docker 未能成功启动，请检查：journalctl -u docker --no-pager -n 50"
+  fi
 }
 
 summary() {
