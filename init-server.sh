@@ -101,8 +101,7 @@ net.core.default_qdisc=fq
 net.ipv4.tcp_congestion_control=bbr
 EOF
   if ! sysctl --system > /dev/null 2>&1; then
-    warn "sysctl 应用失败，BBR 配置未生效"
-    return
+    warn "sysctl 部分配置应用失败，已按实际结果核验"
   fi
   if [ "$(cat /proc/sys/net/ipv4/tcp_congestion_control)" = "bbr" ]; then
     ok "BBR 已启用（当前算法：$(sysctl -n net.ipv4.tcp_congestion_control)）"
@@ -134,6 +133,8 @@ setup_firewall() {
   for p in $WEB_PORTS; do
     iptables -A INPUT -p tcp --dport "$p" -j ACCEPT
   done
+  iptables -A INPUT -i docker0 -j ACCEPT
+  iptables -A INPUT -i br-+ -j ACCEPT
   if [ "$ALLOW_PING" = "1" ]; then
     iptables -A INPUT -p icmp --icmp-type echo-request -j ACCEPT
   fi
@@ -155,6 +156,8 @@ setup_firewall() {
     for p in $WEB_PORTS; do
       ip6tables -A INPUT -p tcp --dport "$p" -j ACCEPT
     done
+    ip6tables -A INPUT -i docker0 -j ACCEPT
+    ip6tables -A INPUT -i br-+ -j ACCEPT
     ip6tables -A INPUT -p ipv6-icmp -m icmp6 --icmpv6-type 133 -j ACCEPT
     ip6tables -A INPUT -p ipv6-icmp -m icmp6 --icmpv6-type 134 -j ACCEPT
     ip6tables -A INPUT -p ipv6-icmp -m icmp6 --icmpv6-type 135 -j ACCEPT

@@ -8,7 +8,7 @@ Oracle Cloud Ubuntu 服务器一键初始化脚本。重装系统后快速完成
 - **基础工具**：curl、wget、git、vim、net-tools、tmux、dnsutils、apt-transport-https、neofetch、btop（另装依赖：gnupg、ca-certificates）
 - **Caddy**：官方 apt 源安装，开机自启
 - **Docker**：Docker CE + Compose 插件（官方源），自动将当前用户加入 `docker` 组
-- **BBR**：启用 Google BBR 拥塞控制加速（内核不支持时自动跳过）
+- **BBR**：启用 Google BBR 拥塞控制加速（自动加载 `tcp_bbr` 模块并在开机时提前加载，内核不支持时自动跳过）
 - **防火墙**：iptables 仅开放 22/80/443 端口，FORWARD 保持放行（不影响 Docker 容器网络），通过 `netfilter-persistent` 持久化
 
 ## 使用前提
@@ -40,9 +40,11 @@ sudo ./init-server.sh
 
 | 链 | 策略 |
 |---|---|
-| INPUT | DROP（仅放行 SSH 22、Web 80/443、回环、已建立连接） |
+| INPUT | DROP（仅放行 SSH 22、Web 80/443、回环、已建立连接、Docker 网桥 `docker0`/`br-+`） |
 | FORWARD | ACCEPT |
 | OUTPUT | ACCEPT |
+
+> INPUT 放行 `docker0`/`br-+` 网桥流量是**必需的**：Docker 不会自动添加此类规则，若不放行，`INPUT DROP` 会阻断容器访问宿主机端口（moby#27817）。代价是容器可访问宿主机的任意端口，这是 Docker 网络的默认行为。若需收紧，可自行在 DOCKER-USER 链中限制。
 
 可通过脚本顶部变量调整：
 
