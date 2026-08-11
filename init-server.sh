@@ -95,6 +95,7 @@ setup_bbr() {
     warn "当前内核不支持 BBR，跳过"
     return
   fi
+  echo "tcp_bbr" > /etc/modules-load.d/tcp-bbr.conf
   cat > /etc/sysctl.d/99-bbr.conf <<'EOF'
 net.core.default_qdisc=fq
 net.ipv4.tcp_congestion_control=bbr
