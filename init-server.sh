@@ -99,8 +99,15 @@ setup_bbr() {
 net.core.default_qdisc=fq
 net.ipv4.tcp_congestion_control=bbr
 EOF
-  sysctl --system > /dev/null
-  ok "BBR 已启用（当前算法：$(sysctl -n net.ipv4.tcp_congestion_control)）"
+  if ! sysctl --system > /dev/null 2>&1; then
+    warn "sysctl 应用失败，BBR 配置未生效"
+    return
+  fi
+  if [ "$(cat /proc/sys/net/ipv4/tcp_congestion_control)" = "bbr" ]; then
+    ok "BBR 已启用（当前算法：$(sysctl -n net.ipv4.tcp_congestion_control)）"
+  else
+    warn "BBR 配置未生效，当前算法：$(sysctl -n net.ipv4.tcp_congestion_control)"
+  fi
 }
 
 setup_firewall() {
@@ -110,6 +117,11 @@ setup_firewall() {
   echo "iptables-persistent iptables-persistent/autosave_v6 boolean true" | debconf-set-selections
   apt-get install -y iptables-persistent > /dev/null
   systemctl enable netfilter-persistent > /dev/null 2>&1 || true
+
+  if command -v ufw > /dev/null 2>&1 && ufw status 2>/dev/null | grep -q "Status: active"; then
+    warn "检测到 UFW 已启用，为避免与 iptables 规则冲突将禁用 UFW"
+    ufw disable > /dev/null
+  fi
 
   iptables -P INPUT ACCEPT
   iptables -F
@@ -142,8 +154,12 @@ setup_firewall() {
     for p in $WEB_PORTS; do
       ip6tables -A INPUT -p tcp --dport "$p" -j ACCEPT
     done
+    ip6tables -A INPUT -p ipv6-icmp -m icmp6 --icmpv6-type 133 -j ACCEPT
+    ip6tables -A INPUT -p ipv6-icmp -m icmp6 --icmpv6-type 134 -j ACCEPT
+    ip6tables -A INPUT -p ipv6-icmp -m icmp6 --icmpv6-type 135 -j ACCEPT
+    ip6tables -A INPUT -p ipv6-icmp -m icmp6 --icmpv6-type 136 -j ACCEPT
     if [ "$ALLOW_PING" = "1" ]; then
-      ip6tables -A INPUT -p icmpv6 --icmpv6-type echo-request -j ACCEPT
+      ip6tables -A INPUT -p ipv6-icmp -m icmp6 --icmpv6-type echo-request -j ACCEPT
     fi
     ip6tables -P INPUT DROP
     ip6tables -P FORWARD ACCEPT
@@ -176,8 +192,8 @@ summary() {
   info "IP 地址: $(hostname -I)"
   echo
   info "服务状态:"
-  systemctl --no-pager status caddy --lines=0 | head -n 3
-  systemctl --no-pager status docker --lines=0 | head -n 3
+  systemctl --no-pager status caddy --lines=0 | head -n 3 || true
+  systemctl --no-pager status docker --lines=0 | head -n 3 || true
   echo
   info "iptables INPUT 规则:"
   iptables -L INPUT -n --line-numbers
