@@ -90,6 +90,7 @@ setup_bbr() {
     return
   fi
   info "启用 BBR 加速..."
+  modprobe tcp_bbr 2>/dev/null || true
   if ! grep -q bbr /proc/sys/net/ipv4/tcp_available_congestion_control 2>/dev/null; then
     warn "当前内核不支持 BBR，跳过"
     return
