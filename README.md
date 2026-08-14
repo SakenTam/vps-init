@@ -9,6 +9,8 @@ Oracle Cloud Ubuntu 服务器一键初始化脚本。重装系统后快速完成
 - **Caddy**：官方 apt 源安装，开机自启
 - **Docker**：Docker CE + Compose 插件（官方源），自动将当前用户加入 `docker` 组
 - **BBR**：启用 Google BBR 拥塞控制加速（自动加载 `tcp_bbr` 模块并在开机时提前加载，内核不支持时自动跳过）
+- **Swap**：内存 < 8G 时自动创建 2G swap 文件并设为开机挂载（swappiness=10，可调 `SWAP_SIZE_MB`）
+- **时区**：默认设为 `Asia/Shanghai`（可调 `TIMEZONE`，空值则保持系统默认）
 - **SSH 加固**：强制密钥登录（禁用密码登录、禁止 root 密码登录、最多尝试 3 次），未检测到 `authorized_keys` 时自动跳过防锁死
 - **journald 持久化**：系统日志跨重启保留（上限 512M 自动轮换），作为监控与审计的数据源
 - **fail2ban**：sshd 防暴力破解，基于 systemd 后端直接读 journal，指数递增封禁（首次 10 分钟，每次翻倍，上限 7 天）
@@ -63,6 +65,8 @@ FAIL2BAN_BANTIME_FACTOR=2      # 每次重犯封禁时长翻倍
 FAIL2BAN_BANTIME_MAX=604800    # 封禁时长上限（秒）= 7 天
 FAIL2BAN_FINDTIME=600          # 统计时间窗（秒）= 10 分钟
 FAIL2BAN_MAXRETRY=3            # 时间窗内失败次数触发封禁
+SWAP_SIZE_MB=2048              # 内存 < 8G 时创建的 swap 大小（MB）
+TIMEZONE=Asia/Shanghai         # 系统时区（设为空则不修改）
 ```
 
 ## SSH 登录监控
@@ -81,7 +85,7 @@ ssh-monitor.sh --watch              # 实时监控登录（Ctrl+C 退出）
 
 数据全部来自 journald（已持久化），不受 auth.log 轮转影响。同时 cron 每分钟将**新增**的成功登录增量追加到 `/var/log/ssh-logins.log`（基于 journald 游标增量读取，游标失效会自动重置自愈，并用 `flock` 防止并发重复写入），便于快速 grep 审计。脚本会自动安装并启用 cron（Oracle Ubuntu 镜像默认未安装 cron，不装则审计日志不会自动增长）。
 
-> 时间显示与审计日志均为 **UTC**（journald 内部使用 UTC 存储），换算本地时区可 `TZ='Asia/Shanghai' date -d '2026-08-15 14:02:31 UTC'`。
+> 时间显示与审计日志采用**服务器本地时区**（脚本默认设为 Asia/Shanghai；journald 内部仍以 UTC 存储，`journalctl`/`ssh-monitor.sh` 输出按本地时区显示，日志尾部带 `+0800` 偏移便于换算）。
 
 ## 查看 SSH 登录日志
 

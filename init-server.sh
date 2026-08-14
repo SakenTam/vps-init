@@ -12,6 +12,8 @@ FAIL2BAN_BANTIME_FACTOR=2
 FAIL2BAN_BANTIME_MAX=604800
 FAIL2BAN_FINDTIME=600
 FAIL2BAN_MAXRETRY=3
+SWAP_SIZE_MB=2048
+TIMEZONE=Asia/Shanghai
 
 C_RED='\033[0;31m'
 C_GREEN='\033[0;32m'
@@ -114,6 +116,46 @@ EOF
   else
     warn "BBR 配置未生效，当前算法：$(sysctl -n net.ipv4.tcp_congestion_control)"
   fi
+}
+
+setup_swap() {
+  local ram_mb
+  ram_mb="$(awk '/MemTotal/{print int($2/1024)}' /proc/meminfo)"
+  if [ "$ram_mb" -ge 8192 ]; then
+    info "内存 ${ram_mb}MB ≥ 8G，跳过 swap 配置"
+    return
+  fi
+  if grep -q "^/swapfile " /etc/fstab 2>/dev/null; then
+    swapon /swapfile 2>/dev/null || true
+    ok "swap 已配置（${SWAP_SIZE_MB}MB），无需重复创建"
+    return
+  fi
+  info "内存 ${ram_mb}MB < 8G，创建 ${SWAP_SIZE_MB}MB swap 文件..."
+  if ! fallocate -l "${SWAP_SIZE_MB}M" /swapfile 2>/dev/null; then
+    dd if=/dev/zero of=/swapfile bs=1M count="$SWAP_SIZE_MB" status=none
+  fi
+  chmod 600 /swapfile
+  mkswap /swapfile > /dev/null
+  swapon /swapfile
+  echo '/swapfile none swap sw 0 0' >> /etc/fstab
+  cat > /etc/sysctl.d/99-swap.conf <<EOF
+vm.swappiness=10
+EOF
+  sysctl --system > /dev/null 2>&1 || true
+  ok "swap 已启用（${SWAP_SIZE_MB}MB，swappiness=10）"
+}
+
+setup_timezone() {
+  if [ "$(cat /etc/timezone 2>/dev/null)" = "$TIMEZONE" ]; then
+    ok "时区已是 $TIMEZONE"
+    return
+  fi
+  info "设置时区为 $TIMEZONE ..."
+  ln -sf "/usr/share/zoneinfo/$TIMEZONE" /etc/localtime
+  echo "$TIMEZONE" > /etc/timezone
+  dpkg-reconfigure -f noninteractive tzdata > /dev/null 2>&1 || true
+  timedatectl set-timezone "$TIMEZONE" 2>/dev/null || true
+  ok "时区已设置为 $TIMEZONE（$(date '+%Z %z')）"
 }
 
 setup_firewall() {
@@ -473,12 +515,14 @@ summary() {
 main() {
   check_root
   check_os
+  setup_timezone
   update_system
   install_base_tools
   setup_ssh_hardening
   setup_caddy
   setup_docker
   setup_bbr
+  setup_swap
   setup_firewall
   setup_journald_persist
   setup_fail2ban
