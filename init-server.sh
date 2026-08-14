@@ -6,6 +6,12 @@ WEB_PORTS="80 443"
 ALLOW_PING=1
 ENABLE_BBR=1
 INIT_USER="${SUDO_USER:-ubuntu}"
+HARDEN_SSH=1
+FAIL2BAN_BANTIME=600
+FAIL2BAN_BANTIME_FACTOR=2
+FAIL2BAN_BANTIME_MAX=604800
+FAIL2BAN_FINDTIME=600
+FAIL2BAN_MAXRETRY=3
 
 C_RED='\033[0;31m'
 C_GREEN='\033[0;32m'
@@ -118,6 +124,9 @@ setup_firewall() {
   apt-get install -y iptables-persistent > /dev/null
   systemctl enable netfilter-persistent > /dev/null 2>&1 || true
 
+  systemctl stop docker > /dev/null 2>&1 || true
+  systemctl stop fail2ban > /dev/null 2>&1 || true
+
   if command -v ufw > /dev/null 2>&1 && ufw status 2>/dev/null | grep -q "Status: active"; then
     warn "检测到 UFW 已启用，为避免与 iptables 规则冲突将禁用 UFW"
     ufw disable > /dev/null
@@ -175,6 +184,247 @@ setup_firewall() {
   fi
 }
 
+setup_ssh_hardening() {
+  if [ "$HARDEN_SSH" != "1" ]; then
+    warn "已跳过 SSH 加固（HARDEN_SSH=0）"
+    return
+  fi
+  info "加固 SSH：仅允许密钥登录..."
+
+  LOGIN_USER="${SUDO_USER:-$(logname 2>/dev/null || echo root)}"
+  KEY_OK=0
+  if [ "$LOGIN_USER" = "root" ]; then
+    [ -s /root/.ssh/authorized_keys ] && KEY_OK=1
+  elif [ -n "$LOGIN_USER" ]; then
+    [ -s "/home/$LOGIN_USER/.ssh/authorized_keys" ] && KEY_OK=1
+  fi
+  if [ "$KEY_OK" -ne 1 ]; then
+    warn "未检测到用户 $LOGIN_USER 的 authorized_keys，为防锁死已跳过禁用密码登录，请先配置密钥后重新执行"
+    return
+  fi
+
+  mkdir -p /etc/ssh/sshd_config.d
+  if [ "$LOGIN_USER" = "root" ]; then
+    ROOT_LINE="PermitRootLogin prohibit-password"
+  else
+    ROOT_LINE="PermitRootLogin no"
+  fi
+  cat > /etc/ssh/sshd_config.d/99-hardening.conf <<EOF
+PubkeyAuthentication yes
+PasswordAuthentication no
+$ROOT_LINE
+MaxAuthTries 3
+EOF
+  chmod 644 /etc/ssh/sshd_config.d/99-hardening.conf
+
+  if sshd -t; then
+    systemctl restart ssh
+    ok "SSH 已加固：禁止密码登录 / 禁止 root 密码登录 / 最多尝试 3 次（$ROOT_LINE）"
+  else
+    warn "sshd 配置校验失败，已回滚，请检查 /etc/ssh/sshd_config.d/99-hardening.conf"
+    rm -f /etc/ssh/sshd_config.d/99-hardening.conf
+  fi
+}
+
+setup_journald_persist() {
+  info "启用 journald 持久化日志..."
+  mkdir -p /etc/systemd/journald.conf.d
+  cat > /etc/systemd/journald.conf.d/00-persistent.conf <<'EOF'
+[Journal]
+Storage=persistent
+SystemMaxUse=512M
+EOF
+  systemctl restart systemd-journald 2>/dev/null || true
+  if [ -d /var/log/journal ]; then
+    ok "journald 已持久化到 /var/log/journal（上限 512M，自动轮换）"
+  else
+    warn "journald 持久化目录未生成，请检查 journalctl -b 输出"
+  fi
+}
+
+setup_fail2ban() {
+  export DEBIAN_FRONTEND=noninteractive
+  info "安装 fail2ban..."
+  apt-get install -y fail2ban > /dev/null
+
+  CURRENT_IP="$(echo "${SSH_CONNECTION:-}" | awk '{print $1}')"
+  cat > /etc/fail2ban/jail.local <<EOF
+[DEFAULT]
+backend = systemd
+bantime = $FAIL2BAN_BANTIME
+bantime.increment = true
+bantime.factor = $FAIL2BAN_BANTIME_FACTOR
+bantime.maxtime = $FAIL2BAN_BANTIME_MAX
+findtime = $FAIL2BAN_FINDTIME
+maxretry = $FAIL2BAN_MAXRETRY
+ignoreip = 127.0.0.1/8 ::1 10.0.0.0/8 172.16.0.0/12 192.168.0.0/16 ${CURRENT_IP:-}
+
+[sshd]
+enabled = true
+port = $SSH_PORT
+journalmatch = _SYSTEMD_UNIT=ssh.service + _COMM=sshd
+EOF
+
+  systemctl enable fail2ban
+  systemctl restart fail2ban
+  STATUS_OK=0
+  for _ in 1 2 3 4 5; do
+    if fail2ban-client status sshd > /dev/null 2>&1; then
+      STATUS_OK=1
+      break
+    fi
+    sleep 1
+  done
+  if [ "$STATUS_OK" = "1" ]; then
+    ok "fail2ban 已启用（sshd：失败 ${FAIL2BAN_MAXRETRY} 次/${FAIL2BAN_FINDTIME}s 封禁，首次 ${FAIL2BAN_BANTIME}s，每次翻倍至 ${FAIL2BAN_BANTIME_MAX}s）"
+  else
+    warn "fail2ban 启动异常，请检查：fail2ban-client status / journalctl -u fail2ban -n 50"
+  fi
+  if [ -z "$CURRENT_IP" ]; then
+    warn "未检测到当前 SSH 连接 IP（可能通过云控制台执行），本次未将其加入白名单，请注意别把自己封了"
+  fi
+}
+
+setup_ssh_monitor() {
+  info "安装 SSH 登录监控（ssh-monitor）..."
+  install -d -m 0755 /usr/local/bin
+  cat > /usr/local/bin/ssh-monitor.sh <<'MONITOR_EOF'
+#!/usr/bin/env bash
+# ssh-monitor.sh - SSH 登录监控与统计（基于 journald）
+set -uo pipefail
+
+AUDIT_LOG=/var/log/ssh-logins.log
+STATE_DIR=/var/lib/ssh-monitor
+CURSOR_FILE="$STATE_DIR/cursor"
+JCTL="journalctl _COMM=sshd --no-pager --output=short-iso"
+
+parse() {
+  awk '{ t=$1; sub(/\+[0-9:]+/,"",t); u=""; ip="";
+        for(i=1;i<=NF;i++){ if($i=="for") u=$(i+1); if($i=="from") ip=$(i+1) }
+        printf "%s %s %s\n", t, u, ip }'
+}
+
+pretty() { sed 's/T/ /'; }
+
+accepted() { $JCTL --since "$1" 2>/dev/null | grep 'Accepted ' || true; }
+failed()   { $JCTL --since "$1" 2>/dev/null | grep 'Failed ' || true; }
+
+usage() {
+  echo "ssh-monitor.sh - SSH 登录监控与统计"
+  echo "用法:"
+  echo "  ssh-monitor.sh                    近 7 天登录统计摘要 + 最近登录"
+  echo "  ssh-monitor.sh --users [窗口]     按用户统计成功登录（默认 7 days ago）"
+  echo "  ssh-monitor.sh --ips [窗口]       按来源 IP 统计成功登录"
+  echo "  ssh-monitor.sh --today            今日登录明细"
+  echo "  ssh-monitor.sh --since \"7 days ago\"  自定义时间窗口的统计摘要"
+  echo "  ssh-monitor.sh --failed [N]       最近 N 条失败尝试（默认 20）+ fail2ban 封禁列表"
+  echo "  ssh-monitor.sh --watch            实时监控登录（Ctrl+C 退出）"
+  echo "  ssh-monitor.sh --record           (内部) cron 增量写入审计日志"
+  echo "  ssh-monitor.sh --help             帮助"
+}
+
+cmd_default() {
+  local since="${1:-7 days ago}"
+  local raw parsed total u_count ip_count
+  raw="$(accepted "$since")"
+  parsed="$(printf '%s\n' "$raw" | parse | grep -v '^ *$')"
+  total="$(printf '%s\n' "$raw" | grep -c . || true)"
+  u_count="$(printf '%s\n' "$parsed" | awk 'NF{c[$2]++} END{print length(c)}')"
+  ip_count="$(printf '%s\n' "$parsed" | awk 'NF{c[$3]++} END{print length(c)}')"
+  echo "===== SSH 登录统计（$since 起）====="
+  echo "成功登录总数: ${total:-0}  |  登录用户数: ${u_count:-0}  |  来源 IP 数: ${ip_count:-0}"
+  echo
+  echo "最近成功登录（时间 用户 来源IP）:"
+  printf '%s\n' "$parsed" | pretty | tail -n 10
+}
+
+cmd_users() {
+  local since="${1:-7 days ago}"
+  echo "===== 按用户统计成功登录（$since 起）====="
+  echo "次数  用户   来源 IP"
+  printf '%s\n' "$(accepted "$since")" | parse | awk '
+    NF{ c[$2]++; key=$2" "$3; if(!(key in seen)){ seen[key]=1; ips[$2]=ips[$2]" "$3 } }
+    END{ for(u in c) printf "%d   %s%s\n", c[u], u, ips[u] }' | sort -rn
+}
+
+cmd_ips() {
+  local since="${1:-7 days ago}"
+  echo "===== 按来源 IP 统计成功登录（$since 起）====="
+  echo "次数  来源 IP"
+  printf '%s\n' "$(accepted "$since")" | parse | awk '
+    NF{ c[$3]++ }
+    END{ for(ip in c) printf "%d   %s\n", c[ip], ip }' | sort -rn
+}
+
+cmd_failed() {
+  local n="${1:-20}"
+  echo "===== 最近 $n 条失败登录尝试（近 7 天）====="
+  failed "7 days ago" | tail -n "$n" | awk '{ t=$1; sub(/\+.*/,"",t); sub(/T/," ",t); $1=t; print }'
+  echo
+  echo "===== fail2ban 当前封禁（sshd jail）====="
+  fail2ban-client status sshd 2>/dev/null | sed -n '/Banned IP list/,+1p' | tail -n +2 || echo "无"
+}
+
+cmd_watch() {
+  echo "实时监控 SSH 登录（Ctrl+C 退出）..."
+  if command -v journalctl > /dev/null 2>&1; then
+    exec journalctl -f _COMM=sshd --output=short
+  else
+    exec tail -f /var/log/auth.log
+  fi
+}
+
+cmd_record() {
+  mkdir -p "$STATE_DIR"
+  touch "$AUDIT_LOG"
+  local cursor="" tmp new_cursor
+  [ -f "$CURSOR_FILE" ] && cursor="$(cat "$CURSOR_FILE" 2>/dev/null || true)"
+  tmp="$(mktemp)"
+  if [ -n "$cursor" ]; then
+    $JCTL --after-cursor="$cursor" --show-cursor > "$tmp" 2>/dev/null || true
+  else
+    $JCTL -n 1 --show-cursor > "$tmp" 2>/dev/null || true
+  fi
+  new_cursor="$(grep -- '-- cursor:' "$tmp" | awk '{print $3}' || true)"
+  if [ -n "$new_cursor" ]; then
+    grep 'Accepted ' "$tmp" | parse | pretty >> "$AUDIT_LOG"
+    printf '%s\n' "$new_cursor" > "$CURSOR_FILE"
+  elif [ -n "$cursor" ]; then
+    rm -f "$CURSOR_FILE"
+    $JCTL -n 1 --show-cursor > "$tmp" 2>/dev/null || true
+    new_cursor="$(grep -- '-- cursor:' "$tmp" | awk '{print $3}' || true)"
+    [ -n "$new_cursor" ] && printf '%s\n' "$new_cursor" > "$CURSOR_FILE"
+  fi
+  rm -f "$tmp"
+}
+
+case "${1:-}" in
+  --users)   cmd_users "${2:-7 days ago}" ;;
+  --ips)     cmd_ips "${2:-7 days ago}" ;;
+  --today)   cmd_default today ;;
+  --since)   cmd_default "${2:-7 days ago}" ;;
+  --failed)  cmd_failed "${2:-20}" ;;
+  --watch)   cmd_watch ;;
+  --record)  cmd_record ;;
+  --help|-h) usage ;;
+  "")        cmd_default ;;
+  *)         usage ;;
+esac
+MONITOR_EOF
+  chmod 0755 /usr/local/bin/ssh-monitor.sh
+
+  cat > /etc/cron.d/ssh-monitor <<'CRON_EOF'
+PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+* * * * * root flock -n /var/lock/ssh-monitor.lock /usr/local/bin/ssh-monitor.sh --record >/dev/null 2>&1
+CRON_EOF
+  chmod 0644 /etc/cron.d/ssh-monitor
+
+  install -d -o root -g root -m 0750 /var/lib/ssh-monitor
+  touch /var/log/ssh-logins.log
+  chmod 0640 /var/log/ssh-logins.log
+  ok "SSH 监控已安装：ssh-monitor.sh（--help 查看用法），审计日志 /var/log/ssh-logins.log"
+}
+
 start_docker() {
   if systemctl is-active --quiet docker; then
     systemctl restart docker
@@ -202,7 +452,12 @@ summary() {
   info "iptables INPUT 规则:"
   iptables -L INPUT -n --line-numbers
   echo
+  info "fail2ban（sshd jail）:"
+  fail2ban-client status sshd 2>/dev/null | grep 'Currently banned' || true
+  info "SSH 监控: ssh-monitor.sh --help / 审计日志 /var/log/ssh-logins.log（每分钟自动追加）"
+  echo
   warn "用户 $INIT_USER 需重新登录后 docker 命令才无需 sudo"
+  warn "SSH 已禁用密码登录，请确保本机私钥可正常使用后再断开当前连接"
   warn "请在 Oracle 云控制台的安全列表（Security List/NSG）中放行 80 和 443 端口"
 }
 
@@ -211,10 +466,14 @@ main() {
   check_os
   update_system
   install_base_tools
+  setup_ssh_hardening
   setup_caddy
   setup_docker
   setup_bbr
   setup_firewall
+  setup_journald_persist
+  setup_fail2ban
+  setup_ssh_monitor
   start_docker
   summary
 }
