@@ -289,7 +289,13 @@ EOF
 }
 
 setup_ssh_monitor() {
+  export DEBIAN_FRONTEND=noninteractive
   info "安装 SSH 登录监控（ssh-monitor）..."
+  if ! systemctl is-active --quiet cron; then
+    info "Oracle Ubuntu 默认未安装 cron，正在安装并启用..."
+    apt-get install -y cron
+    systemctl enable --now cron
+  fi
   install -d -m 0755 /usr/local/bin
   cat > /usr/local/bin/ssh-monitor.sh <<'MONITOR_EOF'
 #!/usr/bin/env bash

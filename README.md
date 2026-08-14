@@ -79,7 +79,7 @@ ssh-monitor.sh --failed             # 最近失败尝试 + fail2ban 封禁列表
 ssh-monitor.sh --watch              # 实时监控登录（Ctrl+C 退出）
 ```
 
-数据全部来自 journald（已持久化），不受 auth.log 轮转影响。同时 cron 每分钟将**新增**的成功登录增量追加到 `/var/log/ssh-logins.log`（基于 journald 游标增量读取，游标失效会自动重置自愈，并用 `flock` 防止并发重复写入），便于快速 grep 审计。
+数据全部来自 journald（已持久化），不受 auth.log 轮转影响。同时 cron 每分钟将**新增**的成功登录增量追加到 `/var/log/ssh-logins.log`（基于 journald 游标增量读取，游标失效会自动重置自愈，并用 `flock` 防止并发重复写入），便于快速 grep 审计。脚本会自动安装并启用 cron（Oracle Ubuntu 镜像默认未安装 cron，不装则审计日志不会自动增长）。
 
 > 时间显示与审计日志均为 **UTC**（journald 内部使用 UTC 存储），换算本地时区可 `TZ='Asia/Shanghai' date -d '2026-08-15 14:02:31 UTC'`。
 
