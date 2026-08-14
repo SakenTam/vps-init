@@ -93,6 +93,36 @@ setup_docker() {
   ok "Docker 安装完成"
 }
 
+setup_docker_logging() {
+  mkdir -p /etc/docker
+  if [ ! -s /etc/docker/daemon.json ]; then
+    cat > /etc/docker/daemon.json <<'EOF'
+{
+  "log-driver": "json-file",
+  "log-opts": {
+    "max-size": "10m",
+    "max-file": "3"
+  }
+}
+EOF
+    ok "Docker 日志轮转已配置（单容器 10m×3 份）"
+  elif ! grep -qE '"(max-size|log-driver|log-opts)"' /etc/docker/daemon.json; then
+    python3 - <<'PYEOF'
+import json
+path = "/etc/docker/daemon.json"
+data = json.load(open(path))
+data.setdefault("log-driver", "json-file")
+data.setdefault("log-opts", {})
+data["log-opts"].setdefault("max-size", "10m")
+data["log-opts"].setdefault("max-file", "3")
+json.dump(data, open(path, "w"), indent=2)
+PYEOF
+    ok "已在现有 daemon.json 中合并 Docker 日志轮转配置"
+  else
+    ok "Docker 日志轮转已配置，跳过"
+  fi
+}
+
 setup_bbr() {
   if [ "$ENABLE_BBR" != "1" ]; then
     return
@@ -143,6 +173,19 @@ vm.swappiness=10
 EOF
   sysctl --system > /dev/null 2>&1 || true
   ok "swap 已启用（${SWAP_SIZE_MB}MB，swappiness=10）"
+}
+
+setup_oomd() {
+  info "启用 systemd-oomd（内存压力下自动回收，防整机僵死）..."
+  if ! command -v systemd-oomd > /dev/null 2>&1; then
+    DEBIAN_FRONTEND=noninteractive apt-get install -y systemd-oomd > /dev/null 2>&1 || true
+  fi
+  systemctl enable --now systemd-oomd > /dev/null 2>&1 || true
+  if systemctl is-active --quiet systemd-oomd; then
+    ok "systemd-oomd 已启用"
+  else
+    warn "systemd-oomd 未能启用（可能不受当前内核/容器环境支持）"
+  fi
 }
 
 setup_timezone() {
@@ -489,6 +532,18 @@ start_docker() {
   fi
 }
 
+setup_apt_cleanup() {
+  info "清理 apt 无用包与缓存..."
+  export DEBIAN_FRONTEND=noninteractive
+  apt-get -y autoremove > /dev/null 2>&1 || true
+  apt-get -y autoclean > /dev/null 2>&1 || true
+  cat > /etc/apt/apt.conf.d/10periodic <<'EOF'
+APT::Periodic::Update-Package-Lists "1";
+APT::Periodic::AutocleanInterval "7";
+EOF
+  ok "apt 清理完成（每周自动清理缓存）"
+}
+
 summary() {
   echo
   ok "========== 服务器初始化完成 =========="
@@ -521,13 +576,16 @@ main() {
   setup_ssh_hardening
   setup_caddy
   setup_docker
+  setup_docker_logging
   setup_bbr
   setup_swap
+  setup_oomd
   setup_firewall
   setup_journald_persist
   setup_fail2ban
   setup_ssh_monitor
   start_docker
+  setup_apt_cleanup
   summary
 }
 
