@@ -115,6 +115,7 @@ fail2ban-client unban <IP>                     # 手动解封
 - 采用**指数递增封禁**：首次封禁 10 分钟，同一 IP 反复触发则每次翻倍，最长封禁 7 天
 - 当前 SSH 连接 IP、回环地址、内网网段（10/8、172.16/12、192.168/16）已自动加入白名单，防止误封；若通过云控制台执行（无 `SSH_CONNECTION`），脚本会警告未加入白名单
 - 使用 **systemd 后端**直接从 journal 读取失败记录，并显式覆盖 `journalmatch = _SYSTEMD_UNIT=ssh.service`——因为 Ubuntu 的 sshd 服务单元名是 `ssh.service` 而非 fail2ban 默认的 `sshd.service`（不覆盖将导致任何失败都检测不到）
+- **[sshd] 使用 `mode = aggressive`**：默认 `normal` 模式会把 `Failed publickey` 和 `Connection closed by authenticating user ... [preauth]` 标记为「不计为失败」(`NOFAIL`)。但脚本已禁用密码登录，攻击者只能产生这两类日志（无法产生 `Failed password`），若不启用 aggressive 模式 fail2ban 将**形同虚设**。aggressive 会额外计数：端口扫描器（`Did not receive identification string`）、preauth 阶段断开/重置的连接等真实攻击信号
 - 封禁机制随版本自动选择：Ubuntu 20.04/22.04 使用 iptables 链（`f2b-sshd`），24.04 使用 nftables 表（`inet f2b-table`），均挂接在 INPUT 链之前，与脚本的 iptables 防火墙规则正确叠加。脚本在重建防火墙前会**先停掉 fail2ban 与 Docker**，保存干净规则后再由后续步骤重启，因此不要在 fail2ban/Docker 运行期间手动执行 `iptables-save`
 - 运行 `fail2ban-client status sshd` 查看封禁状态；`fail2ban-client unban <IP>` 手动解封
 

@@ -263,6 +263,7 @@ ignoreip = 127.0.0.1/8 ::1 10.0.0.0/8 172.16.0.0/12 192.168.0.0/16 ${CURRENT_IP:
 
 [sshd]
 enabled = true
+mode = aggressive
 port = $SSH_PORT
 journalmatch = _SYSTEMD_UNIT=ssh.service + _COMM=sshd
 EOF
