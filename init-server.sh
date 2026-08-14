@@ -217,6 +217,8 @@ MaxAuthTries 3
 EOF
   chmod 644 /etc/ssh/sshd_config.d/99-hardening.conf
 
+  install -d -m 0755 /run/sshd
+
   if sshd -t; then
     systemctl restart ssh
     ok "SSH 已加固：禁止密码登录 / 禁止 root 密码登录 / 最多尝试 3 次（$ROOT_LINE）"
