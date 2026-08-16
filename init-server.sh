@@ -3,6 +3,9 @@ set -euo pipefail
 
 SSH_PORT=22
 WEB_PORTS="80 443"
+# 额外放行端口列表，格式 "port/proto"，proto 为 tcp / udp / both，空格分隔，IPv4 与 IPv6 同时放行
+# 例：EXTRA_PORTS="22698/udp 22698/tcp 30086/udp"（代理类 UDP 端口勿漏，否则 IPv6 客户端会被 ip6tables 丢弃）
+EXTRA_PORTS=""
 ALLOW_PING=1
 ENABLE_BBR=1
 INIT_USER="${SUDO_USER:-ubuntu}"
@@ -201,8 +204,30 @@ setup_timezone() {
   ok "时区已设置为 $TIMEZONE（$(date '+%Z %z')）"
 }
 
+open_extra_ports() {
+  local cmd="$1"
+  [ -n "$EXTRA_PORTS" ] || return 0
+  local entry port proto
+  for entry in $EXTRA_PORTS; do
+    port="${entry%/*}"
+    proto="${entry#*/}"
+    case "$proto" in
+      tcp|udp)
+        "$cmd" -A INPUT -p "$proto" --dport "$port" -m comment --comment "allow $port/$proto(extra)" -j ACCEPT
+        ;;
+      both)
+        "$cmd" -A INPUT -p tcp --dport "$port" -m comment --comment "allow $port/tcp(extra)" -j ACCEPT
+        "$cmd" -A INPUT -p udp --dport "$port" -m comment --comment "allow $port/udp(extra)" -j ACCEPT
+        ;;
+      *)
+        warn "忽略无效的额外端口条目: $entry（格式应为 port/tcp | port/udp | port/both）"
+        ;;
+    esac
+  done
+}
+
 setup_firewall() {
-  info "配置 iptables 防火墙（INPUT 仅开放 ${SSH_PORT}/$(echo "$WEB_PORTS" | tr ' ' '/')）..."
+  info "配置 iptables 防火墙（INPUT 仅开放 ${SSH_PORT}/$(echo "$WEB_PORTS" | tr ' ' '/')${EXTRA_PORTS:+ / 额外: $EXTRA_PORTS}）..."
   export DEBIAN_FRONTEND=noninteractive
   echo "iptables-persistent iptables-persistent/autosave_v4 boolean true" | debconf-set-selections
   echo "iptables-persistent iptables-persistent/autosave_v6 boolean true" | debconf-set-selections
@@ -227,6 +252,7 @@ setup_firewall() {
   for p in $WEB_PORTS; do
     iptables -A INPUT -p tcp --dport "$p" -j ACCEPT
   done
+  open_extra_ports iptables
   iptables -A INPUT -i docker0 -j ACCEPT
   iptables -A INPUT -i br-+ -j ACCEPT
   if [ "$ALLOW_PING" = "1" ]; then
@@ -250,6 +276,7 @@ setup_firewall() {
     for p in $WEB_PORTS; do
       ip6tables -A INPUT -p tcp --dport "$p" -j ACCEPT
     done
+    open_extra_ports ip6tables
     ip6tables -A INPUT -i docker0 -j ACCEPT
     ip6tables -A INPUT -i br-+ -j ACCEPT
     ip6tables -A INPUT -p ipv6-icmp -m icmp6 --icmpv6-type 133 -j ACCEPT
@@ -558,6 +585,9 @@ summary() {
   info "iptables INPUT 规则:"
   iptables -L INPUT -n --line-numbers
   echo
+  if [ -n "$EXTRA_PORTS" ]; then
+    info "额外放行端口（IPv4+IPv6）: $EXTRA_PORTS"
+  fi
   info "fail2ban（sshd jail）:"
   fail2ban-client status sshd 2>/dev/null | grep 'Currently banned' || true
   info "SSH 监控: ssh-monitor.sh --help / 审计日志 /var/log/ssh-logins.log（每分钟自动追加）"
@@ -565,6 +595,9 @@ summary() {
   warn "用户 $INIT_USER 需重新登录后 docker 命令才无需 sudo"
   warn "SSH 已禁用密码登录，请确保本机私钥可正常使用后再断开当前连接"
   warn "请在 Oracle 云控制台的安全列表（Security List/NSG）中放行 80 和 443 端口"
+  if [ -n "$EXTRA_PORTS" ]; then
+    warn "请在 Oracle 云控制台的安全列表中同步放行额外端口（IPv4 与 IPv6 都要）：$EXTRA_PORTS"
+  fi
 }
 
 main() {

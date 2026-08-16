@@ -49,17 +49,21 @@ sudo ./init-server.sh
 
 | 链 | 策略 |
 |---|---|
-| INPUT | DROP（仅放行 SSH 22、Web 80/443、回环、已建立连接、Docker 网桥 `docker0`/`br-+`） |
+| INPUT | DROP（仅放行 SSH 22、Web 80/443、回环、已建立连接、Docker 网桥 `docker0`/`br-+`、额外端口 `EXTRA_PORTS`） |
 | FORWARD | ACCEPT |
 | OUTPUT | ACCEPT |
 
 > INPUT 放行 `docker0`/`br-+` 网桥流量是**必需的**：Docker 不会自动添加此类规则，若不放行，`INPUT DROP` 会阻断容器访问宿主机端口（moby#27817）。代价是容器可访问宿主机的任意端口，这是 Docker 网络的默认行为。若需收紧，可自行在 DOCKER-USER 链中限制。
+
+> **IPv4 与 IPv6 规则保持对称**：`EXTRA_PORTS` 指定的端口会同时在 `iptables`（IPv4）和 `ip6tables`（IPv6）中放行。若只放行 IPv4，IPv6 客户端（如 iOS 优先解析 AAAA 记录的 UDP 类代理 hy2/tuic）会被 `ip6tables INPUT DROP` 静默丢弃，表现为连接超时。
 
 可通过脚本顶部变量调整：
 
 ```bash
 SSH_PORT=22                    # SSH 端口
 WEB_PORTS="80 443"             # 开放的 Web 端口
+EXTRA_PORTS=""                 # 额外放行端口，格式 "port/tcp|port/udp|port/both"，空格分隔，IPv4 与 IPv6 同时放行
+                               # 例：EXTRA_PORTS="22698/udp 22698/tcp 30086/both"
 ALLOW_PING=1                   # 1=允许 ping，0=拒绝
 ENABLE_BBR=1                   # 1=启用 BBR，0=禁用
 HARDEN_SSH=1                   # 1=禁用密码登录，0=跳过加固
@@ -71,6 +75,8 @@ FAIL2BAN_MAXRETRY=3            # 时间窗内失败次数触发封禁
 SWAP_SIZE_MB=2048              # 内存 < 8G 时创建的 swap 大小（MB）
 TIMEZONE=Asia/Shanghai         # 系统时区（设为空则不修改）
 ```
+
+> 代理类服务（hy2/tuic 等 UDP 协议）务必把对应端口加入 `EXTRA_PORTS`。否则重跑脚本时 `iptables -F`/`ip6tables -F` 会清掉第三方安装脚本（如 mack-a）手动添加的规则，导致端口重新被 DROP。
 
 ## SSH 登录监控
 
