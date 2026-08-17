@@ -41,6 +41,14 @@ chmod +x init-server.sh
 sudo ./init-server.sh
 ```
 
+### 跳过防火墙配置
+
+代理服务器（如使用 mack-a/v2ray-agent 搭建 vmess/vless/reality/hy2 等）建议跳过 iptables 配置，由代理工具自行管理防火墙规则，避免 `iptables -F` 清空代理工具添加的规则：
+
+```bash
+sudo bash init-server.sh --skip-iptables
+```
+
 运行完成后**重新登录**一次，使 docker 组权限生效。
 
 ## 防火墙说明
@@ -64,6 +72,7 @@ SSH_PORT=22                    # SSH 端口
 WEB_PORTS="80 443"             # 开放的 Web 端口
 EXTRA_PORTS=""                 # 额外放行端口，格式 "port/tcp|port/udp|port/both"，空格分隔，IPv4 与 IPv6 同时放行
                                # 例：EXTRA_PORTS="22698/udp 22698/tcp 30086/both"
+SKIP_IPTABLES=0                # 1=跳过 iptables/ip6tables 配置（代理服务器建议开启，或使用 --skip-iptables 参数）
 ALLOW_PING=1                   # 1=允许 ping，0=拒绝
 ENABLE_BBR=1                   # 1=启用 BBR，0=禁用
 HARDEN_SSH=1                   # 1=禁用密码登录，0=跳过加固
@@ -76,7 +85,7 @@ SWAP_SIZE_MB=2048              # 内存 < 8G 时创建的 swap 大小（MB）
 TIMEZONE=Asia/Shanghai         # 系统时区（设为空则不修改）
 ```
 
-> 代理类服务（hy2/tuic 等 UDP 协议）务必把对应端口加入 `EXTRA_PORTS`。否则重跑脚本时 `iptables -F`/`ip6tables -F` 会清掉第三方安装脚本（如 mack-a）手动添加的规则，导致端口重新被 DROP。
+> 代理类服务（hy2/tuic 等 UDP 协议）务必把对应端口加入 `EXTRA_PORTS`，或使用 `--skip-iptables` 跳过防火墙配置由代理工具自行管理。否则重跑脚本时 `iptables -F`/`ip6tables -F` 会清掉第三方安装脚本（如 mack-a）手动添加的规则，导致端口重新被 DROP。
 
 ## SSH 登录监控
 
