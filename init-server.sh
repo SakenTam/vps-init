@@ -6,6 +6,7 @@ WEB_PORTS="80 443"
 # 额外放行端口列表，格式 "port/proto"，proto 为 tcp / udp / both，空格分隔，IPv4 与 IPv6 同时放行
 # 例：EXTRA_PORTS="22698/udp 22698/tcp 30086/udp"（代理类 UDP 端口勿漏，否则 IPv6 客户端会被 ip6tables 丢弃）
 EXTRA_PORTS=""
+SKIP_IPTABLES=0
 ALLOW_PING=1
 ENABLE_BBR=1
 INIT_USER="${SUDO_USER:-ubuntu}"
@@ -582,8 +583,12 @@ summary() {
   systemctl --no-pager status caddy --lines=0 | head -n 3 || true
   systemctl --no-pager status docker --lines=0 | head -n 3 || true
   echo
-  info "iptables INPUT 规则:"
-  iptables -L INPUT -n --line-numbers
+  if [ "$SKIP_IPTABLES" = "1" ]; then
+    info "iptables: 已跳过配置（由外部工具管理）"
+  else
+    info "iptables INPUT 规则:"
+    iptables -L INPUT -n --line-numbers
+  fi
   echo
   if [ -n "$EXTRA_PORTS" ]; then
     info "额外放行端口（IPv4+IPv6）: $EXTRA_PORTS"
@@ -601,6 +606,13 @@ summary() {
 }
 
 main() {
+  for arg in "$@"; do
+    case "$arg" in
+      --skip-iptables) SKIP_IPTABLES=1 ;;
+      *) die "未知参数: $arg（可用参数：--skip-iptables）" ;;
+    esac
+  done
+
   check_root
   check_os
   setup_timezone
@@ -613,7 +625,11 @@ main() {
   setup_bbr
   setup_swap
   setup_oomd
-  setup_firewall
+  if [ "$SKIP_IPTABLES" = "1" ]; then
+    warn "已跳过 iptables 防火墙配置（SKIP_IPTABLES=1）"
+  else
+    setup_firewall
+  fi
   setup_journald_persist
   setup_fail2ban
   setup_ssh_monitor
