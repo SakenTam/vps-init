@@ -62,22 +62,6 @@ install_base_tools() {
   ok "基础工具安装完成"
 }
 
-setup_caddy() {
-  export DEBIAN_FRONTEND=noninteractive
-  info "安装 Caddy..."
-  if apt-cache show caddy > /dev/null 2>&1; then
-    apt-get install -y caddy
-  else
-    info "系统源中未找到 caddy，改用官方仓库安装..."
-    curl -fsSL https://dl.cloudsmith.io/public/caddy/stable/gpg.key | gpg --dearmor -o /usr/share/keyrings/caddy-stable-archive-keyring.gpg
-    curl -fsSL https://dl.cloudsmith.io/public/caddy/stable/debian.deb.txt | tee /etc/apt/sources.list.d/caddy-stable.list > /dev/null
-    apt-get update
-    apt-get install -y caddy
-  fi
-  systemctl enable --now caddy
-  ok "Caddy 安装并已启用"
-}
-
 setup_docker() {
   info "安装 Docker CE + Compose 插件..."
   install -m 0755 -d /etc/apt/keyrings
@@ -580,7 +564,6 @@ summary() {
   info "IP 地址: $(hostname -I)"
   echo
   info "服务状态:"
-  systemctl --no-pager status caddy --lines=0 | head -n 3 || true
   systemctl --no-pager status docker --lines=0 | head -n 3 || true
   echo
   if [ "$SKIP_IPTABLES" = "1" ]; then
@@ -619,7 +602,6 @@ main() {
   update_system
   install_base_tools
   setup_ssh_hardening
-  setup_caddy
   setup_docker
   setup_docker_logging
   setup_bbr

@@ -7,7 +7,6 @@ Oracle Cloud Ubuntu 服务器一键初始化脚本。重装系统后快速完成
 - **系统更新**：`apt update && apt upgrade`
 - **apt 清理**：自动 `autoremove` + 清缓存，并配置每周自动清理（`AutocleanInterval`）
 - **基础工具**：curl、wget、git、vim、net-tools、tmux、dnsutils、apt-transport-https、neofetch、btop（另装依赖：gnupg、ca-certificates）
-- **Caddy**：官方 apt 源安装，开机自启
 - **Docker**：Docker CE + Compose 插件（官方源），自动将当前用户加入 `docker` 组
 - **BBR**：启用 Google BBR 拥塞控制加速（自动加载 `tcp_bbr` 模块并在开机时提前加载，内核不支持时自动跳过）
 - **Swap**：内存 < 8G 时自动创建 2G swap 文件并设为开机挂载（swappiness=10，可调 `SWAP_SIZE_MB`）
